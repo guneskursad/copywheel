@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-release:
+    name: Windows Installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+
+      - name: Read package version from Cargo.toml
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $pkg = $meta.packages | Where-Object { $_.name -eq "copywheel" } | Select-Object -First 1
+          if (-not $pkg -or -not $pkg.version) {
+            throw "Failed to read package.version from Cargo.toml"
+          }
+          "APP_VERSION=$($pkg.version)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Detected CopyWheel version: $($pkg.version)"
+
+      - name: Build release binary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build --release --locked
+          if (-not (Test-Path "target\release\copywheel.exe")) {
+            throw "Expected binary target\release\copywheel.exe was not produced"
+          }
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+          if ($iscc) {
+            $isccPath = $iscc.Source
+          } else {
+            $isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $isccPath)) {
+            throw "Inno Setup compiler (ISCC.exe) not found"
+          }
+          & $isccPath "/DAppVersion=$env:APP_VERSION" "installer\windows\copywheel.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "ISCC failed with exit code $LASTEXITCODE"
+          }
+          $stableSetup = "dist\CopyWheel-Setup.exe"
+          $versionedSetup = "dist\CopyWheel-$($env:APP_VERSION)-windows-x64-setup.exe"
+          if (-not (Test-Path $stableSetup)) {
+            throw "Expected installer $stableSetup was not produced"
+          }
+          Copy-Item -Path $stableSetup -Destination $versionedSetup -Force
+
+      - name: Upload Windows assets and update SHA256SUMS
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $stableName = "CopyWheel-Setup.exe"
+          $versionedName = "CopyWheel-$($env:APP_VERSION)-windows-x64-setup.exe"
+          $stablePath = Join-Path "dist" $stableName
+          $versionedPath = Join-Path "dist" $versionedName
+
+          # Ensure the GitHub Release exists before downloading/uploading assets.
+          gh release view $env:RELEASE_TAG 2>$null | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --title $env:RELEASE_TAG --generate-notes
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to create release $env:RELEASE_TAG"
+            }
+          }
+
+          # Preserve existing checksums (such as macOS DMGs) when updating SHA256SUMS.
+          $existingLines = @()
+          $staging = Join-Path $env:RUNNER_TEMP "release-sums"
+          New-Item -ItemType Directory -Path $staging -Force | Out-Null
+          gh release download $env:RELEASE_TAG --pattern "SHA256SUMS" --dir $staging --clobber 2>$null
+          $downloadedSums = Join-Path $staging "SHA256SUMS"
+          if ($LASTEXITCODE -eq 0 -and (Test-Path $downloadedSums)) {
+            $existingLines = Get-Content -Path $downloadedSums | Where-Object {
+              $line = $_.Trim()
+              if (-not $line) { return $false }
+              $parts = $line -split "\s+", 2
+              if ($parts.Count -lt 2) { return $true }
+              $file = $parts[1].TrimStart("*")
+              ($file -ne $stableName) -and ($file -ne $versionedName)
+            }
+          }
+
+          $versionedHash = (Get-FileHash -Path $versionedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $stableHash = (Get-FileHash -Path $stablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $newLines = @(
+            "$versionedHash  $versionedName",
+            "$stableHash  $stableName"
+          )
+
+          $merged = @($existingLines) + $newLines
+          $sumsPath = Join-Path "dist" "SHA256SUMS"
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText($sumsPath, (($merged -join "`n") + "`n"), $utf8NoBom)
+
+          gh release upload $env:RELEASE_TAG $stablePath $versionedPath $sumsPath --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to upload release assets"
+          }
