@@ -12,7 +12,7 @@ arboard = "3"
 auto-launch = "0.6.0"
 base64 = "0.22"
 dirs = "7.0.0"
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow"] }
 global-hotkey = "0.10.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 raw-window-handle = "0.6"
