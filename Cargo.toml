@@ -1,6 +1,6 @@
 [package]
 name = "copywheel"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 description = "A macOS clipboard manager with a history panel and quick-paste wheel."
