@@ -349,7 +349,7 @@ impl App {
             app.pending_snippet = Some(PendingSnippet {
                 prompt: forms::SnippetPrompt::new(
                     "DNS lookup",
-                    vec!["dig @{{resolver:10.0.0.53}} {{domain}} A +notcp".into()],
+                    vec!["dig @{{resolver:9.9.9.9}} {{domain:example.org}} A".into()],
                     &HashMap::new(),
                 ),
                 request: ClipboardRequest { items: Vec::new(), paste: true, close: true },
