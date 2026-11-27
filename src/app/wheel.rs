@@ -8,8 +8,16 @@ use super::*;
 pub(super) const LIST_MAX: usize = 9;
 pub(super) const SCROLL_TO_ROW: &str = "wheel_scroll_to_row";
 pub(super) const SHORTCUT_NUMBERS: [Key; 10] = [
-    Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5,
-    Key::Num6, Key::Num7, Key::Num8, Key::Num9, Key::Num0,
+    Key::Num1,
+    Key::Num2,
+    Key::Num3,
+    Key::Num4,
+    Key::Num5,
+    Key::Num6,
+    Key::Num7,
+    Key::Num8,
+    Key::Num9,
+    Key::Num0,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,10 +36,17 @@ enum WheelRowAction {
 fn take_wheel_row_action(events: &mut Vec<egui::Event>) -> Option<WheelRowAction> {
     let mut action = None;
     events.retain(|event| {
-        let egui::Event::Key { key, modifiers, pressed, repeat, .. } = event else {
+        let egui::Event::Key {
+            key,
+            modifiers,
+            pressed,
+            repeat,
+            ..
+        } = event
+        else {
             return true;
         };
-        if !modifiers.mac_cmd || modifiers.alt || modifiers.shift || modifiers.ctrl {
+        if !command_only(*modifiers) {
             return true;
         }
         let row_action = match key {
@@ -51,23 +66,40 @@ pub(super) fn shortcut_digit(index: usize) -> usize {
     (index + 1) % SHORTCUT_NUMBERS.len()
 }
 
-pub(super) fn take_wheel_shortcut(events: &mut Vec<egui::Event>, number_panel: bool) -> Option<WheelShortcut> {
+pub(super) fn take_wheel_shortcut(
+    events: &mut Vec<egui::Event>,
+    number_panel: bool,
+) -> Option<WheelShortcut> {
     let mut shortcut = None;
     events.retain(|event| {
-        let egui::Event::Key { key, physical_key, modifiers, pressed, repeat } = event else {
+        let egui::Event::Key {
+            key,
+            physical_key,
+            modifiers,
+            pressed,
+            repeat,
+        } = event
+        else {
             return true;
         };
-        if !modifiers.mac_cmd || modifiers.alt || modifiers.shift || modifiers.ctrl {
+        if !command_only(*modifiers) {
             return true;
         }
         let action = if *key == Key::J && !number_panel {
             WheelShortcut::NextPage
         } else {
             let number_key = physical_key.unwrap_or(*key);
-            let Some(index) = SHORTCUT_NUMBERS.iter().position(|&number| number == number_key) else {
+            let Some(index) = SHORTCUT_NUMBERS
+                .iter()
+                .position(|&number| number == number_key)
+            else {
                 return true;
             };
-            if number_panel { WheelShortcut::Row(index) } else { WheelShortcut::Segment(index) }
+            if number_panel {
+                WheelShortcut::Row(index)
+            } else {
+                WheelShortcut::Segment(index)
+            }
         };
         if *pressed && !repeat {
             shortcut.get_or_insert(action);
@@ -78,9 +110,10 @@ pub(super) fn take_wheel_shortcut(events: &mut Vec<egui::Event>, number_panel: b
 }
 
 pub(super) fn take_wheel_copy(ctx: &egui::Context, search: Id, search_focused: bool) -> bool {
-    let has_text_selection = search_focused && TextEdit::load_state(ctx, search)
-        .and_then(|state| state.cursor.char_range())
-        .is_some_and(|range| range.primary.index != range.secondary.index);
+    let has_text_selection = search_focused
+        && TextEdit::load_state(ctx, search)
+            .and_then(|state| state.cursor.char_range())
+            .is_some_and(|range| range.primary.index != range.secondary.index);
     ctx.input_mut(|input| {
         let mut copy = false;
         input.events.retain_mut(|event| {
@@ -105,9 +138,15 @@ pub(super) fn search_id() -> Id {
 }
 
 pub(super) fn group_hotkey_destination(store: &Store, id: u64) -> (Level, Option<usize>) {
-    if store.children(Some(id)).is_empty() && let Some(group) = store.group(id) {
+    if store.children(Some(id)).is_empty()
+        && let Some(group) = store.group(id)
+    {
         let parent = group.parent.filter(|&parent| store.group(parent).is_some());
-        if let Some(index) = store.children(parent).iter().position(|&sibling| sibling == id) {
+        if let Some(index) = store
+            .children(parent)
+            .iter()
+            .position(|&sibling| sibling == id)
+        {
             return (parent.map_or(Level::Root, Level::Group), Some(index));
         }
     }
@@ -159,15 +198,25 @@ impl App {
     fn group_seg(&self, g: &Group) -> Seg {
         let favs = self.store.favorites_in(g.id);
         let subs = self.store.children(Some(g.id));
-        let fav_item = |f: &Favorite| Item { title: f.title.clone(), detail: f.content.preview(90), src: Src::Fav(f.id) };
+        let fav_item = |f: &Favorite| Item {
+            title: f.title.clone(),
+            detail: f.content.preview(90),
+            src: Src::Fav(f.id),
+        };
         let items: Vec<Item> = if subs.is_empty() {
             favs.iter().map(|f| fav_item(f)).collect()
         } else {
             // a group with sub-menus lists everything: each sub-menu name, then its commands
             let mut v: Vec<Item> = favs.iter().map(|f| fav_item(f)).collect();
             for &sid in &subs {
-                let Some(sg) = self.store.group(sid) else { continue };
-                v.push(Item { title: sg.name.clone(), detail: String::new(), src: Src::Header(sid) });
+                let Some(sg) = self.store.group(sid) else {
+                    continue;
+                };
+                v.push(Item {
+                    title: sg.name.clone(),
+                    detail: String::new(),
+                    src: Src::Header(sid),
+                });
                 v.extend(self.store.favorites_in(sid).iter().map(|f| fav_item(f)));
             }
             v
@@ -177,7 +226,12 @@ impl App {
         } else {
             SegAction::Open(Level::Group(g.id))
         };
-        Seg { label: g.name.clone(), action, items, detail: String::new() }
+        Seg {
+            label: g.name.clone(),
+            action,
+            items,
+            detail: String::new(),
+        }
     }
 
     pub(super) fn wheel_segments(&self) -> (Vec<Seg>, usize) {
@@ -199,7 +253,14 @@ impl App {
                         .iter()
                         .take(LIST_MAX)
                         .map(|c| Item {
-                            title: format!("{}{}", ago(c.created), c.source.as_ref().map(|s| format!(" · {s}")).unwrap_or_default()),
+                            title: format!(
+                                "{}{}",
+                                ago(c.created),
+                                c.source
+                                    .as_ref()
+                                    .map(|s| format!(" · {s}"))
+                                    .unwrap_or_default()
+                            ),
                             detail: c.content.preview(90),
                             src: Src::Clip(c.id),
                         })
@@ -239,13 +300,18 @@ impl App {
         };
         let pages = all.len().div_ceil(PER_PAGE).max(1);
         let page = self.wheel.page.min(pages - 1);
-        let mut segs: Vec<Seg> = all.into_iter().skip(page * PER_PAGE).take(PER_PAGE).collect();
+        let mut segs: Vec<Seg> = all
+            .into_iter()
+            .skip(page * PER_PAGE)
+            .take(PER_PAGE)
+            .collect();
         if segs.is_empty() {
             segs.push(Seg {
                 label: "Empty".into(),
                 action: SegAction::Nothing,
                 items: Vec::new(),
-                detail: "No favorites in this group. Click an item’s star in the panel to add it.".into(),
+                detail: "No favorites in this group. Click an item’s star in the panel to add it."
+                    .into(),
             });
         }
         (segs, pages)
@@ -322,7 +388,11 @@ impl App {
 
     pub(super) fn wheel_paste_displayed(&mut self, seg: &Seg, row: usize) {
         let items = self.wheel_displayed_items(seg);
-        if let Some(item) = items.into_iter().nth(row).filter(|i| !matches!(i.src, Src::Header(_))) {
+        if let Some(item) = items
+            .into_iter()
+            .nth(row)
+            .filter(|i| !matches!(i.src, Src::Header(_)))
+        {
             self.paste_wheel(item.src);
         }
     }
@@ -333,7 +403,12 @@ impl App {
         let fav = match src {
             Src::Fav(id) => Some(id),
             Src::Clip(id) => {
-                let content = self.store.history.iter().find(|c| c.id == id).map(|c| c.content.clone());
+                let content = self
+                    .store
+                    .history
+                    .iter()
+                    .find(|c| c.id == id)
+                    .map(|c| c.content.clone());
                 content.and_then(|c| {
                     if let Some(f) = self.store.favorites.iter().find(|f| f.content == c) {
                         Some(f.id)
@@ -355,7 +430,9 @@ impl App {
 
     /// Opens the favorite editor (in the panel, on the Favorites tab).
     pub(super) fn wheel_edit_fav(&mut self, ctx: &egui::Context, id: u64) {
-        let Some(f) = self.store.favorites.iter().find(|f| f.id == id).cloned() else { return };
+        let Some(f) = self.store.favorites.iter().find(|f| f.id == id).cloned() else {
+            return;
+        };
         self.show(ctx, Mode::Panel, Level::Root);
         self.tab = Tab::Favorites;
         self.editor = Some(FavEditor {
@@ -373,8 +450,22 @@ impl App {
     /// Opens the editor for a history entry; saving makes it a favorite
     /// (an entry that already is a favorite opens that favorite instead).
     pub(super) fn wheel_edit_clip(&mut self, ctx: &egui::Context, clip_id: u64) {
-        let Some(content) = self.store.history.iter().find(|c| c.id == clip_id).map(|c| c.content.clone()) else { return };
-        if let Some(fid) = self.store.favorites.iter().find(|f| f.content == content).map(|f| f.id) {
+        let Some(content) = self
+            .store
+            .history
+            .iter()
+            .find(|c| c.id == clip_id)
+            .map(|c| c.content.clone())
+        else {
+            return;
+        };
+        if let Some(fid) = self
+            .store
+            .favorites
+            .iter()
+            .find(|f| f.content == content)
+            .map(|f| f.id)
+        {
             return self.wheel_edit_fav(ctx, fid);
         }
         let group = self.default_group();
@@ -434,7 +525,12 @@ impl App {
                 let (target, sel) = match level {
                     Level::Group(g) => {
                         let parent = self.store.group(g).and_then(|x| x.parent);
-                        let pos = self.store.children(parent).iter().position(|&id| id == g).unwrap_or(0);
+                        let pos = self
+                            .store
+                            .children(parent)
+                            .iter()
+                            .position(|&id| id == g)
+                            .unwrap_or(0);
                         (parent.map(Level::Group).unwrap_or(Level::Root), pos)
                     }
                     _ => (Level::Root, self.store.children(None).len()),
@@ -448,7 +544,11 @@ impl App {
 
     fn wheel_select(&mut self, segs: &[Seg], sel: usize, keep_list: bool) {
         self.wheel.sel = sel;
-        self.wheel.item = if keep_list { step_item(&segs[sel].items, None, 1) } else { None };
+        self.wheel.item = if keep_list {
+            step_item(&segs[sel].items, None, 1)
+        } else {
+            None
+        };
     }
 
     pub(super) fn wheel_keys(&mut self, ctx: &egui::Context) {
@@ -508,7 +608,10 @@ impl App {
         if let Some(action) = row_action {
             if let Some(row) = self.wheel.item {
                 let displayed = self.wheel_displayed_items(&segs[self.wheel.sel]);
-                if let Some(item) = displayed.get(row).filter(|item| !matches!(item.src, Src::Header(_))) {
+                if let Some(item) = displayed
+                    .get(row)
+                    .filter(|item| !matches!(item.src, Src::Header(_)))
+                {
                     match action {
                         WheelRowAction::Edit => self.wheel_edit_row(ctx, item.src),
                         WheelRowAction::Delete => self.wheel_delete_row(item.src, false),
@@ -572,7 +675,10 @@ impl App {
                 }
             }
             _ => {
-                if enter && !self.wheel.number_panel && matches!(segs[self.wheel.sel].action, SegAction::Panel(_)) {
+                if enter
+                    && !self.wheel.number_panel
+                    && matches!(segs[self.wheel.sel].action, SegAction::Panel(_))
+                {
                     self.wheel_activate(ctx, self.wheel.sel);
                     return;
                 }
@@ -601,13 +707,20 @@ impl App {
         let nums = SHORTCUT_NUMBERS;
         let pressed = ctx.input(|i| {
             i.events.iter().find_map(|e| match e {
-                egui::Event::Key { key, pressed: true, modifiers, .. }
-                    if !modifiers.mac_cmd && !modifiers.alt => nums.iter().position(|k| k == key),
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if !modifiers.command && !modifiers.alt => nums.iter().position(|k| k == key),
                 _ => None,
             })
         });
         let Some(k) = pressed else { return };
-        ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Key { key, .. } if nums.contains(key))));
+        ctx.input_mut(|i| {
+            i.events
+                .retain(|e| !matches!(e, egui::Event::Key { key, .. } if nums.contains(key)))
+        });
         if self.wheel.item.is_some() {
             if k < rows {
                 self.wheel_paste_displayed(&segs[self.wheel.sel], k);
@@ -625,25 +738,61 @@ impl App {
 
 fn wheel_search(store: &Store, query: &str) -> Vec<Item> {
     let now = store::now();
-    let paths: HashMap<_, _> = store.groups.iter().map(|g| (g.id, store.group_path(g.id))).collect();
+    let paths: HashMap<_, _> = store
+        .groups
+        .iter()
+        .map(|g| (g.id, store.group_path(g.id)))
+        .collect();
     let favorites = store.favorites.iter().filter_map(|favorite| {
         let path = paths.get(&favorite.group).map_or("", String::as_str);
         let score = store::score_favorite(path, &favorite.lower, query)?;
-        let title = if path.is_empty() { favorite.title.clone() } else { format!("{path} · {}", favorite.title) };
-        let item = Item { title, detail: favorite.content.preview(90), src: Src::Fav(favorite.id) };
-        Some((score, true, store::frecency(favorite.uses, favorite.last_used, now), 0, item))
+        let title = if path.is_empty() {
+            favorite.title.clone()
+        } else {
+            format!("{path} · {}", favorite.title)
+        };
+        let item = Item {
+            title,
+            detail: favorite.content.preview(90),
+            src: Src::Fav(favorite.id),
+        };
+        Some((
+            score,
+            true,
+            store::frecency(favorite.uses, favorite.last_used, now),
+            0,
+            item,
+        ))
     });
     let history = store.history.iter().filter_map(|clip| {
         let score = store::score(&clip.lower, query)?;
-        let title = format!("{}{}", ago(clip.created), clip.source.as_ref().map(|source| format!(" · {source}")).unwrap_or_default());
-        let item = Item { title, detail: clip.content.preview(90), src: Src::Clip(clip.id) };
+        let title = format!(
+            "{}{}",
+            ago(clip.created),
+            clip.source
+                .as_ref()
+                .map(|source| format!(" · {source}"))
+                .unwrap_or_default()
+        );
+        let item = Item {
+            title,
+            detail: clip.content.preview(90),
+            src: Src::Clip(clip.id),
+        };
         Some((score, false, 0.0, clip.created, item))
     });
     let mut hits: Vec<_> = favorites.chain(history).collect();
     // On equal scores, keep favorites ahead of history. Each type has its own tie-break.
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1))
-        .then_with(|| b.2.total_cmp(&a.2)).then_with(|| b.3.cmp(&a.3)));
-    hits.into_iter().take(20).map(|(_, _, _, _, item)| item).collect()
+    hits.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| b.2.total_cmp(&a.2))
+            .then_with(|| b.3.cmp(&a.3))
+    });
+    hits.into_iter()
+        .take(20)
+        .map(|(_, _, _, _, item)| item)
+        .collect()
 }
 
 /// Next selectable row (headers are skipped), wrapping around; `dir` is 1 or -1.
@@ -671,7 +820,13 @@ mod tests {
     use super::*;
 
     fn event(key: Key, physical_key: Key, modifiers: Modifiers, repeat: bool) -> egui::Event {
-        egui::Event::Key { key, physical_key: Some(physical_key), pressed: true, repeat, modifiers }
+        egui::Event::Key {
+            key,
+            physical_key: Some(physical_key),
+            pressed: true,
+            repeat,
+            modifiers,
+        }
     }
 
     #[test]
@@ -681,14 +836,20 @@ mod tests {
             store.favorites.push(Favorite {
                 id,
                 title: "Find".into(),
-                content: Content::Text { text: "needle".into() },
+                content: Content::Text {
+                    text: "needle".into(),
+                },
                 uses: id as u32,
                 last_used: store::now(),
                 ..Favorite::default()
             });
         }
         store.history.push_back(Clip {
-            id: 50, content: Content::Text { text: "needle".into() }, ..Clip::default()
+            id: 50,
+            content: Content::Text {
+                text: "needle".into(),
+            },
+            ..Clip::default()
         });
         store.reindex();
         let items = wheel_search(&store, "needle");
@@ -698,11 +859,24 @@ mod tests {
         assert!(matches!(items[2].src, Src::Fav(20)));
     }
 
+    fn command_mods() -> Modifiers {
+        if cfg!(target_os = "macos") {
+            Modifiers::MAC_CMD | Modifiers::COMMAND
+        } else {
+            Modifiers::CTRL | Modifiers::COMMAND
+        }
+    }
+
     #[test]
     fn row_actions_consume_command_chords_without_repeating_delete() {
-        let command = Modifiers::MAC_CMD | Modifiers::COMMAND;
+        let command = command_mods();
         let plain_back = event(Key::Backspace, Key::Backspace, Modifiers::NONE, false);
-        let shifted_back = event(Key::Backspace, Key::Backspace, command | Modifiers::SHIFT, false);
+        let shifted_back = event(
+            Key::Backspace,
+            Key::Backspace,
+            command | Modifiers::SHIFT,
+            false,
+        );
         let mut events = vec![
             plain_back.clone(),
             shifted_back.clone(),
@@ -715,7 +889,10 @@ mod tests {
         assert_eq!(take_wheel_row_action(&mut edit), Some(WheelRowAction::Edit));
         assert!(edit.is_empty());
         let mut delete = vec![event(Key::Backspace, Key::Backspace, command, false)];
-        assert_eq!(take_wheel_row_action(&mut delete), Some(WheelRowAction::Delete));
+        assert_eq!(
+            take_wheel_row_action(&mut delete),
+            Some(WheelRowAction::Delete)
+        );
         assert!(delete.is_empty());
     }
 
@@ -723,11 +900,14 @@ mod tests {
     fn command_numbers_use_physical_key_and_preserve_search_text() {
         let mut events = vec![
             egui::Event::Text("dns ".into()),
-            event(Key::A, Key::Num1, Modifiers::MAC_CMD | Modifiers::COMMAND, false),
+            event(Key::A, Key::Num1, command_mods(), false),
             event(Key::A, Key::A, Modifiers::NONE, false),
             egui::Event::Text("a".into()),
         ];
-        assert_eq!(take_wheel_shortcut(&mut events, false), Some(WheelShortcut::Segment(0)));
+        assert_eq!(
+            take_wheel_shortcut(&mut events, false),
+            Some(WheelShortcut::Segment(0))
+        );
         assert_eq!(events.len(), 3);
         assert_eq!(events[0], egui::Event::Text("dns ".into()));
         assert_eq!(events[2], egui::Event::Text("a".into()));
@@ -735,10 +915,16 @@ mod tests {
 
     #[test]
     fn command_zero_targets_the_active_area_and_ignores_repeat() {
-        let modifiers = Modifiers::MAC_CMD | Modifiers::COMMAND;
+        let modifiers = command_mods();
         let key = event(Key::Num0, Key::Num0, modifiers, false);
-        assert_eq!(take_wheel_shortcut(&mut vec![key.clone()], false), Some(WheelShortcut::Segment(9)));
-        assert_eq!(take_wheel_shortcut(&mut vec![key], true), Some(WheelShortcut::Row(9)));
+        assert_eq!(
+            take_wheel_shortcut(&mut vec![key.clone()], false),
+            Some(WheelShortcut::Segment(9))
+        );
+        assert_eq!(
+            take_wheel_shortcut(&mut vec![key], true),
+            Some(WheelShortcut::Row(9))
+        );
 
         let mut events = vec![event(Key::Num0, Key::Num0, modifiers, true)];
         assert_eq!(take_wheel_shortcut(&mut events, true), None);
@@ -747,7 +933,7 @@ mod tests {
 
     #[test]
     fn command_shift_digits_and_command_tab_are_reserved() {
-        let command = Modifiers::MAC_CMD | Modifiers::COMMAND;
+        let command = command_mods();
         let mut reserved = vec![
             event(Key::Num3, Key::Num3, command | Modifiers::SHIFT, false),
             event(Key::Tab, Key::Tab, command, false),
@@ -756,12 +942,20 @@ mod tests {
         assert_eq!(reserved.len(), 2);
         let mut next_page = vec![event(Key::J, Key::J, command, false)];
         assert_eq!(take_wheel_shortcut(&mut next_page.clone(), true), None);
-        assert_eq!(take_wheel_shortcut(&mut next_page, false), Some(WheelShortcut::NextPage));
+        assert_eq!(
+            take_wheel_shortcut(&mut next_page, false),
+            Some(WheelShortcut::NextPage)
+        );
     }
 
     #[test]
     fn command_control_digits_do_not_activate_a_card() {
-        let modifiers = Modifiers::MAC_CMD | Modifiers::COMMAND | Modifiers::CTRL;
+        let extra = if cfg!(target_os = "macos") {
+            Modifiers::CTRL
+        } else {
+            Modifiers::ALT
+        };
+        let modifiers = command_mods() | extra;
         let mut events = vec![event(Key::Num1, Key::Num1, modifiers, false)];
         assert_eq!(take_wheel_shortcut(&mut events, true), None);
     }
@@ -769,8 +963,18 @@ mod tests {
     #[test]
     fn group_hotkeys_keep_leaf_groups_on_the_parent_wheel() {
         let mut store = Store::default();
-        for (id, name, parent) in [(1, "dns-commands", None), (2, "performance-tools", None), (3, "CPU", Some(2))] {
-            store.groups.push(Group { id, name: name.into(), color: PALETTE[0], hotkey: String::new(), parent });
+        for (id, name, parent) in [
+            (1, "dns-commands", None),
+            (2, "performance-tools", None),
+            (3, "CPU", Some(2)),
+        ] {
+            store.groups.push(Group {
+                id,
+                name: name.into(),
+                color: PALETTE[0],
+                hotkey: String::new(),
+                parent,
+            });
         }
         let (level, panel) = group_hotkey_destination(&store, 1);
         assert!(level == Level::Root);

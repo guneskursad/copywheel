@@ -154,7 +154,11 @@ impl Palette {
 
     fn visuals(&self) -> egui::Visuals {
         // Preserve egui's existing light widget states.
-        let mut visuals = if self.dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() };
+        let mut visuals = if self.dark_mode {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
         visuals.panel_fill = self.bg;
         visuals.window_fill = self.bg2;
         visuals.window_stroke = Stroke::new(1.0_f32, self.line);
@@ -245,7 +249,10 @@ mod tests {
             (Theme::Dark, egui::Theme::Light, true),
             (Theme::System, egui::Theme::Light, false),
         ] {
-            let input = egui::RawInput { system_theme: Some(system), ..Default::default() };
+            let input = egui::RawInput {
+                system_theme: Some(system),
+                ..Default::default()
+            };
             let _ = ctx.run(input, |ctx| {
                 apply(ctx, preference);
                 assert_eq!(palette(ctx).dark_mode, dark);

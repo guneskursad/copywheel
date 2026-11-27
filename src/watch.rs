@@ -1,17 +1,19 @@
 //! Background clipboard watcher: notices new copies and sends them to the app.
 
 use crate::platform;
-use crate::store::{self, fnv1a, Content};
+use crate::store::{self, Content, fnv1a};
 use image::ImageEncoder;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 use std::time::Duration;
 
 pub enum Msg {
     Clip(Content, u64, Option<String>),
     Hotkey(u32),
     Menu(String),
+    #[cfg(windows)]
+    TrayToggle,
 }
 
 pub fn spawn(tx: Sender<Msg>, ctx: eframe::egui::Context, skip_concealed: Arc<AtomicBool>) {
@@ -56,7 +58,9 @@ pub fn spawn(tx: Sender<Msg>, ctx: eframe::egui::Context, skip_concealed: Arc<At
                 }
                 let hash = fnv1a(&img.bytes);
                 let file = format!("{hash:016x}.png");
-                let Ok(path) = store::image_path(&file) else { continue };
+                let Ok(path) = store::image_path(&file) else {
+                    continue;
+                };
                 let (w, h) = (img.width as u32, img.height as u32);
                 if !path.is_file() {
                     let Some(buf) = image::RgbaImage::from_raw(w, h, img.bytes.into_owned()) else {
@@ -80,12 +84,18 @@ pub fn spawn(tx: Sender<Msg>, ctx: eframe::egui::Context, skip_concealed: Arc<At
 
 /// Puts content on the clipboard.
 pub fn set_clipboard(content: &Content) -> bool {
-    let Ok(mut cb) = arboard::Clipboard::new() else { return false };
+    let Ok(mut cb) = arboard::Clipboard::new() else {
+        return false;
+    };
     match content {
         Content::Text { text } => cb.set_text(text.clone()).is_ok(),
         Content::Image { file, .. } => {
-            let Ok(path) = store::image_path(file) else { return false };
-            let Ok(img) = image::open(path) else { return false };
+            let Ok(path) = store::image_path(file) else {
+                return false;
+            };
+            let Ok(img) = image::open(path) else {
+                return false;
+            };
             let rgba = img.to_rgba8();
             let (w, h) = rgba.dimensions();
             cb.set_image(arboard::ImageData {

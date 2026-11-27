@@ -80,7 +80,8 @@ impl Pen<'_> {
     }
 
     fn circle(&self, c: (f32, f32), r: f32) {
-        self.p.circle_stroke(self.at(c.0, c.1), r * self.k, Stroke::new(self.w, self.col));
+        self.p
+            .circle_stroke(self.at(c.0, c.1), r * self.k, Stroke::new(self.w, self.col));
     }
 
     fn disc(&self, c: (f32, f32), r: f32, col: Color32) {
@@ -90,7 +91,8 @@ impl Pen<'_> {
     fn rrect(&self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) {
         let rect = Rect::from_min_max(self.at(x0, y0), self.at(x1, y1));
         let cr = CornerRadius::same((r * self.k).round().clamp(0.0, 255.0) as u8);
-        self.p.rect_stroke(rect, cr, Stroke::new(self.w, self.col), StrokeKind::Middle);
+        self.p
+            .rect_stroke(rect, cr, Stroke::new(self.w, self.col), StrokeKind::Middle);
     }
 
     fn rrect_filled(&self, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) {
@@ -98,7 +100,6 @@ impl Pen<'_> {
         let cr = CornerRadius::same((r * self.k).round().clamp(0.0, 255.0) as u8);
         self.p.rect_filled(rect, cr, self.col);
     }
-
 }
 
 fn arc_points(c: (f32, f32), r: f32, a0: f32, a1: f32) -> Vec<(f32, f32)> {
@@ -131,7 +132,13 @@ pub(super) fn paint_icon(p: &egui::Painter, icon: Icon, rect: Rect, col: Color32
     let size = rect.width().min(rect.height());
     let k = size / 24.0;
     let o = rect.center() - vec2(12.0 * k, 12.0 * k);
-    let pen = Pen { p, o, k, col, w: stroke_for(size) };
+    let pen = Pen {
+        p,
+        o,
+        k,
+        col,
+        w: stroke_for(size),
+    };
     match icon {
         Icon::Close => {
             pen.line((6.5, 6.5), (17.5, 17.5));
@@ -154,7 +161,16 @@ pub(super) fn paint_icon(p: &egui::Painter, icon: Icon, rect: Rect, col: Color32
             pen.poly(&pts, true);
         }
         Icon::Pencil => {
-            pen.poly(&[(4.5, 19.5), (5.5, 15.0), (15.5, 5.0), (19.0, 8.5), (9.0, 18.5)], true);
+            pen.poly(
+                &[
+                    (4.5, 19.5),
+                    (5.5, 15.0),
+                    (15.5, 5.0),
+                    (19.0, 8.5),
+                    (9.0, 18.5),
+                ],
+                true,
+            );
             pen.line((13.2, 7.3), (16.7, 10.8));
         }
         Icon::Trash => {
@@ -177,7 +193,17 @@ pub(super) fn paint_icon(p: &egui::Painter, icon: Icon, rect: Rect, col: Color32
         }
         Icon::Pin => {
             pen.line((7.5, 4.0), (16.5, 4.0));
-            pen.poly(&[(9.5, 4.0), (9.5, 10.0), (6.0, 14.5), (18.0, 14.5), (14.5, 10.0), (14.5, 4.0)], false);
+            pen.poly(
+                &[
+                    (9.5, 4.0),
+                    (9.5, 10.0),
+                    (6.0, 14.5),
+                    (18.0, 14.5),
+                    (14.5, 10.0),
+                    (14.5, 4.0),
+                ],
+                false,
+            );
             pen.line((12.0, 14.5), (12.0, 20.5));
         }
         Icon::Clipboard => {
@@ -187,11 +213,13 @@ pub(super) fn paint_icon(p: &egui::Painter, icon: Icon, rect: Rect, col: Color32
             pen.line((9.0, 16.0), (13.0, 16.0));
         }
         Icon::Settings => {
-            let teeth: Vec<_> = (0..32).map(|i| {
-                let angle = i as f32 * TAU / 32.0 - PI / 32.0;
-                let radius = if i % 4 < 2 { 9.6 } else { 7.7 };
-                (12.0 + radius * angle.cos(), 12.0 + radius * angle.sin())
-            }).collect();
+            let teeth: Vec<_> = (0..32)
+                .map(|i| {
+                    let angle = i as f32 * TAU / 32.0 - PI / 32.0;
+                    let radius = if i % 4 < 2 { 9.6 } else { 7.7 };
+                    (12.0 + radius * angle.cos(), 12.0 + radius * angle.sin())
+                })
+                .collect();
             pen.poly(&teeth, true);
             pen.circle((12.0, 12.0), 3.2);
         }
@@ -202,16 +230,43 @@ pub(super) fn paint_icon(p: &egui::Painter, icon: Icon, rect: Rect, col: Color32
             pen.line((8.0, 16.0), (13.0, 16.0));
         }
         Icon::Link => {
-            pen.poly(&[(10.2, 7.0), (14.0, 3.4), (18.3, 3.4), (20.6, 5.7),
-                (20.6, 10.0), (17.0, 13.8)], false);
-            pen.poly(&[(13.8, 17.0), (10.0, 20.6), (5.7, 20.6), (3.4, 18.3),
-                (3.4, 14.0), (7.0, 10.2)], false);
+            pen.poly(
+                &[
+                    (10.2, 7.0),
+                    (14.0, 3.4),
+                    (18.3, 3.4),
+                    (20.6, 5.7),
+                    (20.6, 10.0),
+                    (17.0, 13.8),
+                ],
+                false,
+            );
+            pen.poly(
+                &[
+                    (13.8, 17.0),
+                    (10.0, 20.6),
+                    (5.7, 20.6),
+                    (3.4, 18.3),
+                    (3.4, 14.0),
+                    (7.0, 10.2),
+                ],
+                false,
+            );
             pen.line((8.5, 15.5), (15.5, 8.5));
         }
         Icon::Image => {
             pen.rrect(2.5, 4.0, 21.5, 20.0, 3.0);
             pen.disc((8.0, 9.0), 1.5, col);
-            pen.poly(&[(4.0, 17.0), (8.5, 12.8), (12.0, 16.0), (16.5, 11.5), (20.0, 15.0)], false);
+            pen.poly(
+                &[
+                    (4.0, 17.0),
+                    (8.5, 12.8),
+                    (12.0, 16.0),
+                    (16.5, 11.5),
+                    (20.0, 15.0),
+                ],
+                false,
+            );
         }
         Icon::Right => pen.poly(&[(9.0, 5.0), (15.0, 12.0), (9.0, 19.0)], false),
         Icon::Down => pen.poly(&[(5.0, 9.0), (12.0, 15.0), (19.0, 9.0)], false),

@@ -7,10 +7,18 @@ use egui::emath::GuiRounding;
 const SECTOR_GAP: f32 = 10.0;
 const ARC_SAMPLE_LENGTH: f32 = 2.0;
 
-pub(super) fn arc_points(center: Pos2, radius: f32, angles: std::ops::RangeInclusive<f32>) -> Vec<Pos2> {
-    let samples = (((angles.end() - angles.start()) * radius / ARC_SAMPLE_LENGTH).ceil() as usize).max(1);
+pub(super) fn arc_points(
+    center: Pos2,
+    radius: f32,
+    angles: std::ops::RangeInclusive<f32>,
+) -> Vec<Pos2> {
+    let samples =
+        (((angles.end() - angles.start()) * radius / ARC_SAMPLE_LENGTH).ceil() as usize).max(1);
     (0..=samples)
-        .map(|i| center + egui::Vec2::angled(egui::lerp(angles.clone(), i as f32 / samples as f32)) * radius)
+        .map(|i| {
+            center
+                + egui::Vec2::angled(egui::lerp(angles.clone(), i as f32 / samples as f32)) * radius
+        })
         .collect()
 }
 
@@ -51,7 +59,11 @@ impl Sector {
     }
 
     fn outline(&self) -> Vec<Pos2> {
-        self.outer.iter().chain(self.inner.iter().rev()).copied().collect()
+        self.outer
+            .iter()
+            .chain(self.inner.iter().rev())
+            .copied()
+            .collect()
     }
 
     pub(super) fn stroke(&self, painter: &egui::Painter, stroke: Stroke) {
@@ -96,7 +108,10 @@ pub(super) fn sector_label_width(
     if step <= PI {
         let first = mid - step / 2.0;
         let last = mid + step / 2.0;
-        for normal in [vec2(-first.sin(), first.cos()), vec2(last.sin(), -last.cos())] {
+        for normal in [
+            vec2(-first.sin(), first.cos()),
+            vec2(last.sin(), -last.cos()),
+        ] {
             if normal.x.abs() > 0.001 {
                 let room = normal.dot(offset) - normal.y.abs() * half_height - SECTOR_GAP / 2.0;
                 half_width = half_width.min(room / normal.x.abs());
@@ -107,17 +122,35 @@ pub(super) fn sector_label_width(
 }
 
 /// A soft drop shadow under a rounded card.
-pub(super) fn card_shadow(colors: &Palette, p: &egui::Painter, r: Rect, radius: u8, alpha: f32, light_strength: f32) {
+pub(super) fn card_shadow(
+    colors: &Palette,
+    p: &egui::Painter,
+    r: Rect,
+    radius: u8,
+    alpha: f32,
+    light_strength: f32,
+) {
     let shadow = egui::epaint::Shadow {
         offset: [0, 8],
         blur: 28,
         spread: 0,
-        color: with_alpha(colors.card_shadow, if colors.dark_mode { alpha } else { alpha * light_strength }),
+        color: with_alpha(
+            colors.card_shadow,
+            if colors.dark_mode {
+                alpha
+            } else {
+                alpha * light_strength
+            },
+        ),
     };
     let mut shape = shadow.as_shape(r, CornerRadius::same(radius));
     // epaint's inward feather nearly collapses the fill when the blur reaches the
     // short side. Leave room for the inner contour after pixel rounding.
-    let short_side = shape.rect.round_to_pixels(p.pixels_per_point()).size().min_elem();
+    let short_side = shape
+        .rect
+        .round_to_pixels(p.pixels_per_point())
+        .size()
+        .min_elem();
     shape.blur_width = shape.blur_width.min((short_side - 2.0).max(0.0));
     p.add(shape);
 }

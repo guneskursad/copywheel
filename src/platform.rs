@@ -1,4 +1,5 @@
-//! Small macOS helpers: show/hide the app, mouse position, paste key, pasteboard state.
+//! Small platform helpers: show/hide the app, mouse position, paste key, pasteboard state,
+//! single-instance mutex, and start-at-login registration.
 
 #[cfg(target_os = "macos")]
 mod imp {
@@ -7,6 +8,8 @@ mod imp {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSPasteboard, NSView, NSWorkspace};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
 
     #[link(name = "ApplicationServices", kind = "framework")]
     // SAFETY: This declaration matches the no-argument ApplicationServices function.
@@ -14,10 +17,22 @@ mod imp {
         fn AXIsProcessTrusted() -> bool;
     }
 
+    pub struct InstanceMutex;
+
+    pub fn create_instance_mutex() -> Option<InstanceMutex> {
+        None
+    }
+
     pub fn disable_window_shadow(handle: &impl HasWindowHandle, force: bool) {
-        let Some(_mtm) = MainThreadMarker::new() else { return };
-        let Ok(handle) = handle.window_handle() else { return };
-        let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
+        let Some(_mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let Ok(handle) = handle.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return;
+        };
         // SAFETY: The borrowed AppKit handle keeps its NSView alive, and we are on the main thread.
         let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
         if let Some(window) = view.window()
@@ -55,7 +70,9 @@ mod imp {
     pub fn post_paste() {
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(220));
-            let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else { return };
+            let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+                return;
+            };
             const KEY_V: u16 = 9;
             if let Ok(down) = CGEvent::new_keyboard_event(src.clone(), KEY_V, true) {
                 down.set_flags(CGEventFlags::CGEventFlagCommand);
@@ -96,7 +113,9 @@ mod imp {
     /// True when the pasteboard marks a copy as hidden, temporary, or auto-generated.
     pub fn is_concealed() -> bool {
         let pb = NSPasteboard::generalPasteboard();
-        let Some(types) = pb.types() else { return false };
+        let Some(types) = pb.types() else {
+            return false;
+        };
         types.iter().any(|t| {
             let s = t.to_string();
             s == "org.nspasteboard.ConcealedType"
@@ -111,10 +130,425 @@ mod imp {
         let app = ws.frontmostApplication()?;
         app.localizedName().map(|n| n.to_string())
     }
+
+    fn resolve_app_bundle(exe: &Path) -> Option<PathBuf> {
+        exe.ancestors()
+            .find(|p| p.extension().and_then(|ext| ext.to_str()) == Some("app"))
+            .map(Path::to_path_buf)
+    }
+
+    pub fn apply_launch_at_login(enabled: bool) -> Result<(), String> {
+        let exe =
+            std::env::current_exe().map_err(|e| format!("Could not resolve app path: {e}"))?;
+        if resolve_app_bundle(&exe).is_none() {
+            static SKIPPED_LOG: OnceLock<()> = OnceLock::new();
+            SKIPPED_LOG.get_or_init(|| {
+                eprintln!("CopyWheel: not running from an app bundle; skipping start-at-login registration.");
+            });
+            return Ok(());
+        }
+        let exe_str = exe
+            .to_str()
+            .ok_or_else(|| "App path contains invalid UTF-8.".to_string())?;
+        let auto = auto_launch::AutoLaunchBuilder::new()
+            .set_app_name("local.copywheel")
+            .set_app_path(exe_str)
+            .set_macos_launch_mode(auto_launch::MacOSLaunchMode::LaunchAgent)
+            .set_bundle_identifiers(&["local.clipwheel"])
+            .set_args(&["--background"])
+            .build()
+            .map_err(|e| format!("Could not configure start at login: {e}"))?;
+        if enabled {
+            auto.enable()
+                .map_err(|e| format!("Could not enable start at login: {e}"))
+        } else {
+            auto.disable()
+                .map_err(|e| format!("Could not disable start at login: {e}"))
+        }
+    }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 mod imp {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::ffi::{OsString, c_void};
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, HGLOBAL, HWND, POINT};
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+    };
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable,
+        OpenClipboard, RegisterClipboardFormatW,
+    };
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows::Win32::System::Threading::{
+        AttachThreadInput, CreateMutexW, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
+        VIRTUAL_KEY, VK_CONTROL, VK_V,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        ASFW_ANY, AllowSetForegroundWindow, GetCursorPos, GetForegroundWindow,
+        GetWindowThreadProcessId, IsIconic, IsWindow, SW_HIDE, SW_RESTORE, SW_SHOW,
+        SetForegroundWindow, ShowWindow,
+    };
+    use windows::core::{PWSTR, w};
+
+    static OUR_HWND: AtomicIsize = AtomicIsize::new(0);
+    static PREV_HWND: AtomicIsize = AtomicIsize::new(0);
+
+    pub struct InstanceMutex(HANDLE);
+
+    impl Drop for InstanceMutex {
+        fn drop(&mut self) {
+            if !self.0.is_invalid() {
+                // SAFETY: self.0 is a valid mutex handle owned by this guard.
+                let _ = unsafe { CloseHandle(self.0) };
+            }
+        }
+    }
+
+    struct HandleGuard(HANDLE);
+
+    impl Drop for HandleGuard {
+        fn drop(&mut self) {
+            if !self.0.is_invalid() {
+                // SAFETY: self.0 is a valid kernel handle owned by this guard.
+                let _ = unsafe { CloseHandle(self.0) };
+            }
+        }
+    }
+
+    struct ClipboardGuard;
+
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            // SAFETY: ClipboardGuard is only constructed immediately after OpenClipboard succeeds.
+            let _ = unsafe { CloseClipboard() };
+        }
+    }
+
+    /// Creates the named mutex `Local\CopyWheel` for installer upgrade detection.
+    pub fn create_instance_mutex() -> Option<InstanceMutex> {
+        // SAFETY: Passing None attributes and a static NUL-terminated UTF-16 name is valid.
+        let handle = unsafe { CreateMutexW(None, false, w!("Local\\CopyWheel")) }.ok()?;
+        Some(InstanceMutex(handle))
+    }
+
+    pub fn register_window(handle: &impl HasWindowHandle) {
+        let Ok(handle) = handle.window_handle() else {
+            return;
+        };
+        if let RawWindowHandle::Win32(win) = handle.as_raw() {
+            OUR_HWND.store(win.hwnd.get(), Ordering::Relaxed);
+        }
+    }
+
+    fn our_hwnd() -> Option<HWND> {
+        let raw = OUR_HWND.load(Ordering::Relaxed);
+        (raw != 0).then_some(HWND(raw as *mut c_void))
+    }
+
+    fn focus_window(target: HWND) {
+        // SAFETY: target is either our registered HWND or validated via IsWindow.
+        if unsafe { SetForegroundWindow(target) }.as_bool() {
+            return;
+        }
+        // SAFETY: GetForegroundWindow has no preconditions.
+        let fg = unsafe { GetForegroundWindow() };
+        // SAFETY: GetCurrentThreadId has no preconditions.
+        let cur_tid = unsafe { GetCurrentThreadId() };
+        let fg_tid = if fg.0.is_null() {
+            0
+        } else {
+            // SAFETY: fg is a non-null HWND; passing None for process id is valid.
+            unsafe { GetWindowThreadProcessId(fg, None) }
+        };
+        if fg_tid != 0 && fg_tid != cur_tid {
+            // SAFETY: Both thread IDs are valid Win32 thread identifiers.
+            let attached = unsafe { AttachThreadInput(cur_tid, fg_tid, true) }.as_bool();
+            // SAFETY: ASFW_ANY is a documented constant for AllowSetForegroundWindow.
+            let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+            // SAFETY: target is a live window handle.
+            let _ = unsafe { SetForegroundWindow(target) };
+            if attached {
+                // SAFETY: Detaching the thread input queues attached immediately above.
+                let _ = unsafe { AttachThreadInput(cur_tid, fg_tid, false) };
+            }
+        } else {
+            // SAFETY: ASFW_ANY is a documented constant for AllowSetForegroundWindow.
+            let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+            // SAFETY: target is a live window handle.
+            let _ = unsafe { SetForegroundWindow(target) };
+        }
+    }
+
+    pub fn show_app() {
+        let Some(our) = our_hwnd() else {
+            return;
+        };
+        // SAFETY: GetForegroundWindow has no preconditions.
+        let fg = unsafe { GetForegroundWindow() };
+        if !fg.0.is_null() && fg != our {
+            PREV_HWND.store(fg.0 as isize, Ordering::SeqCst);
+        }
+        // SAFETY: our is the live HWND registered for our window.
+        let iconic = unsafe { IsIconic(our) }.as_bool();
+        if iconic {
+            // SAFETY: our is our live window handle.
+            let _ = unsafe { ShowWindow(our, SW_RESTORE) };
+        }
+        // SAFETY: our is our live window handle.
+        let _ = unsafe { ShowWindow(our, SW_SHOW) };
+        focus_window(our);
+    }
+
+    pub fn hide_app() {
+        if let Some(our) = our_hwnd() {
+            // SAFETY: our is our live window handle.
+            let _ = unsafe { ShowWindow(our, SW_HIDE) };
+        }
+        let prev_raw = PREV_HWND.swap(0, Ordering::SeqCst);
+        if prev_raw != 0 {
+            let prev = HWND(prev_raw as *mut c_void);
+            // SAFETY: IsWindow safely validates whether an arbitrary HWND is still valid.
+            if unsafe { IsWindow(Some(prev)) }.as_bool() {
+                focus_window(prev);
+            }
+        }
+    }
+
+    fn window_scale() -> f32 {
+        let dpi = our_hwnd()
+            .map(|hwnd| {
+                // SAFETY: hwnd is our live window handle.
+                unsafe { GetDpiForWindow(hwnd) }
+            })
+            .unwrap_or(0);
+        if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
+    }
+
+    /// Mouse position in logical screen points, top-left origin (supports multi-monitor and
+    /// negative coordinates).
+    pub fn cursor_pos() -> Option<(f32, f32)> {
+        let mut pt = POINT::default();
+        // SAFETY: pt is a valid writable POINT.
+        unsafe { GetCursorPos(&mut pt) }.ok()?;
+        let scale = window_scale();
+        Some((pt.x as f32 / scale, pt.y as f32 / scale))
+    }
+
+    /// Work area `(left, top, right, bottom)` in logical points for the monitor under the cursor.
+    pub fn cursor_monitor_rect() -> Option<(f32, f32, f32, f32)> {
+        let mut pt = POINT::default();
+        // SAFETY: pt is a valid writable POINT.
+        unsafe { GetCursorPos(&mut pt) }.ok()?;
+        // SAFETY: MonitorFromPoint accepts any virtual screen coordinates.
+        let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+        if hmon.0.is_null() {
+            return None;
+        }
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: info.cbSize is initialized and hmon is non-null.
+        if !unsafe { GetMonitorInfoW(hmon, &mut info) }.as_bool() {
+            return None;
+        }
+        let scale = window_scale();
+        let r = info.rcWork;
+        Some((
+            r.left as f32 / scale,
+            r.top as f32 / scale,
+            r.right as f32 / scale,
+            r.bottom as f32 / scale,
+        ))
+    }
+
+    /// Sends Ctrl+V to the foreground window after a short delay.
+    pub fn post_paste() {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            let key_input = |vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: vk,
+                        wScan: 0,
+                        dwFlags: flags,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            };
+            let inputs = [
+                key_input(VK_CONTROL, KEYBD_EVENT_FLAGS(0)),
+                key_input(VK_V, KEYBD_EVENT_FLAGS(0)),
+                key_input(VK_V, KEYEVENTF_KEYUP),
+                key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+            ];
+            // SAFETY: inputs is a valid slice of initialized INPUT structs and cbSize matches INPUT.
+            let _ = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
+        });
+    }
+
+    pub fn accessibility_ok() -> bool {
+        true
+    }
+
+    #[allow(dead_code)]
+    pub fn open_accessibility_settings() {}
+
+    pub fn open_folder(path: &Path) {
+        let _ = std::process::Command::new("explorer.exe")
+            .arg(path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+
+    pub fn change_count() -> isize {
+        // SAFETY: GetClipboardSequenceNumber takes no arguments and has no preconditions.
+        unsafe { GetClipboardSequenceNumber() as isize }
+    }
+
+    /// True when the clipboard contains a password-manager / history-exclusion marker.
+    pub fn is_concealed() -> bool {
+        static EXCLUDE_FMT: OnceLock<u32> = OnceLock::new();
+        static IGNORE_FMT: OnceLock<u32> = OnceLock::new();
+        static HISTORY_FMT: OnceLock<u32> = OnceLock::new();
+
+        let exclude = *EXCLUDE_FMT.get_or_init(|| {
+            // SAFETY: Static NUL-terminated UTF-16 format name.
+            unsafe { RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")) }
+        });
+        if exclude != 0 {
+            // SAFETY: IsClipboardFormatAvailable does not require opening the clipboard.
+            if unsafe { IsClipboardFormatAvailable(exclude) }.is_ok() {
+                return true;
+            }
+        }
+
+        let ignore = *IGNORE_FMT.get_or_init(|| {
+            // SAFETY: Static NUL-terminated UTF-16 format name.
+            unsafe { RegisterClipboardFormatW(w!("Clipboard Viewer Ignore")) }
+        });
+        if ignore != 0 {
+            // SAFETY: IsClipboardFormatAvailable does not require opening the clipboard.
+            if unsafe { IsClipboardFormatAvailable(ignore) }.is_ok() {
+                return true;
+            }
+        }
+
+        let history = *HISTORY_FMT.get_or_init(|| {
+            // SAFETY: Static NUL-terminated UTF-16 format name.
+            unsafe { RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory")) }
+        });
+        if history == 0 {
+            return false;
+        }
+        // SAFETY: IsClipboardFormatAvailable does not require opening the clipboard.
+        if unsafe { IsClipboardFormatAvailable(history) }.is_err() {
+            return false;
+        }
+        // SAFETY: Opening the clipboard with None associates it with the current task.
+        if unsafe { OpenClipboard(None) }.is_err() {
+            return false;
+        }
+        let _guard = ClipboardGuard;
+        // SAFETY: Clipboard is open and guarded by ClipboardGuard.
+        let Ok(handle) = (unsafe { GetClipboardData(history) }) else {
+            return false;
+        };
+        if handle.0.is_null() {
+            return false;
+        }
+        let hglobal = HGLOBAL(handle.0);
+        // SAFETY: handle was returned by GetClipboardData while the clipboard is open.
+        if unsafe { GlobalSize(hglobal) } < size_of::<u32>() {
+            return false;
+        }
+        // SAFETY: hglobal is a valid clipboard global memory handle.
+        let ptr = unsafe { GlobalLock(hglobal) };
+        if ptr.is_null() {
+            return false;
+        }
+        // SAFETY: GlobalSize >= size_of::<u32>() and ptr is locked non-null memory.
+        let allow = unsafe { std::ptr::read_unaligned(ptr.cast::<u32>()) };
+        // SAFETY: Matching unlock for the GlobalLock call above.
+        let _ = unsafe { GlobalUnlock(hglobal) };
+        allow == 0
+    }
+
+    pub fn frontmost_app_name() -> Option<String> {
+        // SAFETY: GetForegroundWindow has no preconditions.
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut pid = 0u32;
+        // SAFETY: hwnd is non-null and pid is a valid writable u32.
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        if pid == 0 {
+            return None;
+        }
+        // SAFETY: Opening a process with PROCESS_QUERY_LIMITED_INFORMATION is safe for any pid.
+        let proc = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+        let _guard = HandleGuard(proc);
+
+        let mut buf = vec![0u16; 1024];
+        let mut len = buf.len() as u32;
+        // SAFETY: buf has capacity `len` UTF-16 code units and proc is a live process handle.
+        unsafe {
+            QueryFullProcessImageNameW(proc, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len)
+        }
+        .ok()?;
+        let path = PathBuf::from(OsString::from_wide(&buf[..len as usize]));
+        path.file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+    }
+
+    pub fn apply_launch_at_login(enabled: bool) -> Result<(), String> {
+        let exe =
+            std::env::current_exe().map_err(|e| format!("Could not resolve app path: {e}"))?;
+        let exe_str = exe
+            .to_str()
+            .ok_or_else(|| "App path contains invalid UTF-8.".to_string())?;
+        let exe_str = exe_str.strip_prefix(r"\\?\").unwrap_or(exe_str);
+        let quoted = format!("\"{exe_str}\"");
+        let auto = auto_launch::AutoLaunchBuilder::new()
+            .set_app_name(crate::DISPLAY_NAME)
+            .set_app_path(&quoted)
+            .set_windows_enable_mode(auto_launch::WindowsEnableMode::CurrentUser)
+            .set_args(&["--background"])
+            .build()
+            .map_err(|e| format!("Could not configure start at login: {e}"))?;
+        if enabled {
+            auto.enable()
+                .map_err(|e| format!("Could not enable start at login: {e}"))
+        } else {
+            auto.disable()
+                .map_err(|e| format!("Could not disable start at login: {e}"))
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+mod imp {
+    pub struct InstanceMutex;
+
+    pub fn create_instance_mutex() -> Option<InstanceMutex> {
+        None
+    }
+
     pub fn hide_app() {}
     pub fn show_app() {}
     pub fn cursor_pos() -> Option<(f32, f32)> {
@@ -124,6 +558,7 @@ mod imp {
     pub fn accessibility_ok() -> bool {
         true
     }
+    #[allow(dead_code)]
     pub fn open_accessibility_settings() {}
     pub fn open_folder(_path: &std::path::Path) {}
     pub fn change_count() -> isize {
@@ -134,6 +569,9 @@ mod imp {
     }
     pub fn frontmost_app_name() -> Option<String> {
         None
+    }
+    pub fn apply_launch_at_login(_enabled: bool) -> Result<(), String> {
+        Ok(())
     }
 }
 

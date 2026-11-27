@@ -91,7 +91,8 @@ pub fn logo_rgba(n: usize, style: Style) -> Vec<u8> {
                             let t = fy / nf;
                             let mut c = [0f32; 3];
                             for i in 0..3 {
-                                let bg = CREAM_TOP[i] as f32 + (CREAM_BOTTOM[i] as f32 - CREAM_TOP[i] as f32) * t;
+                                let bg = CREAM_TOP[i] as f32
+                                    + (CREAM_BOTTOM[i] as f32 - CREAM_TOP[i] as f32) * t;
                                 let with_mark = bg + (INK[i] as f32 - bg) * mark;
                                 c[i] = with_mark + (DOT[i] as f32 - with_mark) * dot;
                             }

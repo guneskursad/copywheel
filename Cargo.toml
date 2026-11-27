@@ -9,23 +9,42 @@ readme = "README.md"
 
 [dependencies]
 arboard = "3"
+auto-launch = "0.6.0"
 base64 = "0.22"
-core-graphics = "0.25.0"
 dirs = "7.0.0"
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
 global-hotkey = "0.10.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSPasteboard", "NSWorkspace", "NSRunningApplication", "NSView", "NSWindow"] }
-objc2-foundation = "0.3"
+raw-window-handle = "0.6"
+rfd = { version = "0.15", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tray-icon = "0.27.0"
 winit = { version = "0.30", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-raw-window-handle = "0.6"
-rfd = { version = "0.15", default-features = false }
+core-graphics = "0.25.0"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSPasteboard", "NSWorkspace", "NSRunningApplication", "NSView", "NSWindow"] }
+objc2-foundation = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.34"
 
 [profile.release]
 lto = true

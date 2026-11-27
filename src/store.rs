@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,7 +18,9 @@ pub enum Content {
 
 impl Default for Content {
     fn default() -> Self {
-        Self::Text { text: String::new() }
+        Self::Text {
+            text: String::new(),
+        }
     }
 }
 
@@ -147,8 +150,33 @@ pub struct Settings {
     pub auto_paste: bool,
     pub skip_concealed: bool,
     pub hide_on_blur: bool,
+    pub launch_at_login: bool,
     /// Set once the old wheel shortcut (Ctrl+Alt+V) was moved to Ctrl+Shift+F.
     pub wheel_key_v2: bool,
+}
+
+pub fn default_hotkey_panel() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Cmd+Shift+V"
+    } else {
+        "Ctrl+Shift+V"
+    }
+}
+
+pub fn default_hotkey_wheel() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Ctrl+Shift+F"
+    } else {
+        "Ctrl+Alt+F"
+    }
+}
+
+pub fn default_hotkey_favorites() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Ctrl+Alt+F"
+    } else {
+        "Ctrl+Alt+Shift+F"
+    }
 }
 
 impl Default for Settings {
@@ -158,12 +186,13 @@ impl Default for Settings {
             duplicates: Duplicates::default(),
             move_used_to_top: true,
             history_limit: 500,
-            hotkey_panel: "Cmd+Shift+V".into(),
-            hotkey_wheel: "Ctrl+Shift+F".into(),
-            hotkey_favorites: "Ctrl+Alt+F".into(),
+            hotkey_panel: default_hotkey_panel().into(),
+            hotkey_wheel: default_hotkey_wheel().into(),
+            hotkey_favorites: default_hotkey_favorites().into(),
             auto_paste: true,
             skip_concealed: true,
             hide_on_blur: true,
+            launch_at_login: true,
             wheel_key_v2: false,
         }
     }
@@ -265,7 +294,11 @@ fn init_data_dir(read_only: bool) -> &'static PathBuf {
         if read_only {
             let current = base.join(crate::DISPLAY_NAME);
             let legacy = base.join("ClipWheel");
-            if !current.exists() && legacy.is_dir() { legacy } else { current }
+            if !current.exists() && legacy.is_dir() {
+                legacy
+            } else {
+                current
+            }
         } else {
             copywheel_data_dir(&base)
         }
@@ -275,16 +308,22 @@ fn init_data_dir(read_only: bool) -> &'static PathBuf {
 fn copywheel_data_dir(base: &std::path::Path) -> PathBuf {
     let current = base.join(crate::DISPLAY_NAME);
     let legacy = base.join("ClipWheel");
-    if !current.exists() && legacy.is_dir()
-        && fs::rename(&legacy, &current).is_err() && !current.is_dir()
+    if !current.exists()
+        && legacy.is_dir()
+        && fs::rename(&legacy, &current).is_err()
+        && !current.is_dir()
     {
         return legacy;
     }
     current
 }
 
+#[cfg(unix)]
 pub fn create_private_dir(path: &Path) -> io::Result<()> {
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_dir() {
         return Err(ErrorKind::NotADirectory.into());
@@ -295,12 +334,31 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+pub fn create_private_dir(path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir() {
+        return Err(ErrorKind::NotADirectory.into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn tighten_file(path: &Path, metadata: fs::Metadata) -> io::Result<()> {
     if !metadata.is_file() {
         return Err(ErrorKind::InvalidData.into());
     }
     if metadata.permissions().mode() & (0o7777 & !0o600) != 0 {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn tighten_file(_path: &Path, metadata: fs::Metadata) -> io::Result<()> {
+    if !metadata.is_file() {
+        return Err(ErrorKind::InvalidData.into());
     }
     Ok(())
 }
@@ -313,7 +371,9 @@ fn prepare_data_dir(dir: &Path) -> io::Result<()> {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name == "data.json" || name == "data.json.tmp" || name.starts_with("data.json.tmp-")
+        if name == "data.json"
+            || name == "data.json.tmp"
+            || name.starts_with("data.json.tmp-")
             || name.starts_with("data.json.corrupt-")
         {
             tighten_file(&entry.path(), fs::symlink_metadata(entry.path())?)?;
@@ -329,14 +389,23 @@ fn prepare_data_dir(dir: &Path) -> io::Result<()> {
 }
 
 pub fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(path)?;
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let mut file = opts.open(path)?;
+    #[cfg(unix)]
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
     file.set_len(0)?;
     file.write_all(bytes)
 }
 
 fn create_private_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    opts.open(path)
 }
 
 pub fn image_path(file: &str) -> io::Result<PathBuf> {
@@ -368,8 +437,12 @@ pub fn save_image(file: &str, bytes: &[u8]) -> io::Result<()> {
     create_private_dir(path.parent().ok_or(ErrorKind::InvalidInput)?)?;
     match create_private_file(&path) {
         Ok(mut output) => {
-            let result = output.set_permissions(fs::Permissions::from_mode(0o600))
+            #[cfg(unix)]
+            let result = output
+                .set_permissions(fs::Permissions::from_mode(0o600))
                 .and_then(|()| output.write_all(bytes));
+            #[cfg(not(unix))]
+            let result = output.write_all(bytes);
             if result.is_err() {
                 let _ = fs::remove_file(&path);
             }
@@ -415,7 +488,11 @@ impl Store {
 
     pub fn first_run() -> Self {
         let mut s = Store::default();
-        type SampleGroup = (&'static str, [u8; 3], &'static [(&'static str, &'static str)]);
+        type SampleGroup = (
+            &'static str,
+            [u8; 3],
+            &'static [(&'static str, &'static str)],
+        );
         let samples: [SampleGroup; 3] = [
             (
                 "General",
@@ -433,18 +510,30 @@ impl Store {
                     ("Meeting", "Can we have a quick meeting tomorrow at 10:00?"),
                 ],
             ),
-            ("Code", PALETTE[2], &[("TODO", "// TODO: "), ("Log", "println!(\"{:?}\", value);")]),
+            (
+                "Code",
+                PALETTE[2],
+                &[("TODO", "// TODO: "), ("Log", "println!(\"{:?}\", value);")],
+            ),
         ];
         for (name, color, items) in samples {
             let gid = s.new_id();
-            s.groups.push(Group { id: gid, name: name.into(), color, hotkey: String::new(), parent: None });
+            s.groups.push(Group {
+                id: gid,
+                name: name.into(),
+                color,
+                hotkey: String::new(),
+                parent: None,
+            });
             for (title, text) in items {
                 let id = s.new_id();
                 s.favorites.push(Favorite {
                     id,
                     group: gid,
                     title: (*title).into(),
-                    content: Content::Text { text: (*text).into() },
+                    content: Content::Text {
+                        text: (*text).into(),
+                    },
                     ..Favorite::default()
                 });
             }
@@ -459,41 +548,62 @@ impl Store {
 
     fn load_from(dir: &Path, read_only: bool) -> Self {
         if !read_only && prepare_data_dir(dir).is_err() {
-            return Self::unavailable("CopyWheel could not secure its data directory. Saving is disabled.");
+            return Self::unavailable(
+                "CopyWheel could not secure its data directory. Saving is disabled.",
+            );
         }
         let path = dir.join("data.json");
         let mut s = match fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<Self>(&bytes) {
                 Ok(store) => store,
                 Err(_) if read_only => {
-                    return Self::unavailable("Clipboard data is corrupt. The original file was kept.");
+                    return Self::unavailable(
+                        "Clipboard data is corrupt. The original file was kept.",
+                    );
                 }
                 Err(_) if preserve_corrupt_data(&path, dir).is_ok() => Self {
-                    load_notice: Some("Clipboard data was corrupt. The original was saved and CopyWheel started empty."),
+                    load_notice: Some(
+                        "Clipboard data was corrupt. The original was saved and CopyWheel started empty.",
+                    ),
                     ..Self::default()
                 },
                 Err(_) => {
-                    return Self::unavailable("Clipboard data is corrupt and could not be moved. Saving is disabled.");
+                    return Self::unavailable(
+                        "Clipboard data is corrupt and could not be moved. Saving is disabled.",
+                    );
                 }
             },
             Err(error) if error.kind() == ErrorKind::NotFound => Self::first_run(),
-            Err(_) => return Self::unavailable("Clipboard data could not be read. Saving is disabled."),
+            Err(_) => {
+                return Self::unavailable("Clipboard data could not be read. Saving is disabled.");
+            }
         };
         if s.groups.is_empty() {
             let id = s.new_id();
-            s.groups.push(Group { id, name: "General".into(), color: PALETTE[0], hotkey: String::new(), parent: None });
+            s.groups.push(Group {
+                id,
+                name: "General".into(),
+                color: PALETTE[0],
+                hotkey: String::new(),
+                parent: None,
+            });
         }
         s.settings.history_limit = s.settings.history_limit.clamp(HISTORY_MIN, HISTORY_MAX);
         // The person asked for Ctrl+Shift+F to open the favorites wheel.
         if !s.settings.wheel_key_v2 {
             if s.settings.hotkey_wheel == "Ctrl+Alt+V" {
-                s.settings.hotkey_wheel = "Ctrl+Shift+F".into();
+                s.settings.hotkey_wheel = default_hotkey_wheel().into();
             }
             s.settings.wheel_key_v2 = true;
         }
         // group colours from earlier palettes move to the crisp light palette
         for g in s.groups.iter_mut() {
-            if let Some(i) = OLD_PALETTE.iter().chain(WARM_PALETTE.iter()).chain(DRACULA_PALETTE.iter()).position(|c| *c == g.color) {
+            if let Some(i) = OLD_PALETTE
+                .iter()
+                .chain(WARM_PALETTE.iter())
+                .chain(DRACULA_PALETTE.iter())
+                .position(|c| *c == g.color)
+            {
                 g.color = PALETTE[i % PALETTE.len()];
             }
         }
@@ -502,7 +612,11 @@ impl Store {
     }
 
     fn unavailable(notice: &'static str) -> Self {
-        Self { load_notice: Some(notice), save_blocked: true, ..Self::default() }
+        Self {
+            load_notice: Some(notice),
+            save_blocked: true,
+            ..Self::default()
+        }
     }
 
     pub fn save(&self) {
@@ -513,13 +627,23 @@ impl Store {
         if self.save_blocked || create_private_dir(dir).is_err() {
             return;
         }
-        let Ok(bytes) = serde_json::to_vec(self) else { return };
+        let Ok(bytes) = serde_json::to_vec(self) else {
+            return;
+        };
         static SAVE_ID: AtomicU64 = AtomicU64::new(0);
         let id = SAVE_ID.fetch_add(1, Ordering::Relaxed);
         let tmp = dir.join(format!("data.json.tmp-{}-{id}", std::process::id()));
-        let Ok(mut file) = create_private_file(&tmp) else { return };
-        let result = file.set_permissions(fs::Permissions::from_mode(0o600))
+        let Ok(mut file) = create_private_file(&tmp) else {
+            return;
+        };
+        #[cfg(unix)]
+        let result = file
+            .set_permissions(fs::Permissions::from_mode(0o600))
             .and_then(|()| file.write_all(&bytes))
+            .and_then(|()| fs::rename(&tmp, dir.join("data.json")));
+        #[cfg(not(unix))]
+        let result = file
+            .write_all(&bytes)
             .and_then(|()| fs::rename(&tmp, dir.join("data.json")));
         if result.is_err() {
             let _ = fs::remove_file(&tmp);
@@ -550,7 +674,15 @@ impl Store {
         }
         let id = self.new_id();
         let lower = clip_search_text(&content, source.as_deref());
-        self.history.push_front(Clip { id, content, hash, created: now(), source, lower, ..Clip::default() });
+        self.history.push_front(Clip {
+            id,
+            content,
+            hash,
+            created: now(),
+            source,
+            lower,
+            ..Clip::default()
+        });
         self.trim();
         true
     }
@@ -572,7 +704,9 @@ impl Store {
     /// Moves the newest entry with this content to the top (used after pasting it from
     /// the app). Returns false when there is none.
     pub fn bring_to_top(&mut self, content: &Content) -> bool {
-        let Some(pos) = self.history.iter().position(|c| &c.content == content) else { return false };
+        let Some(pos) = self.history.iter().position(|c| &c.content == content) else {
+            return false;
+        };
         if let Some(mut c) = self.history.remove(pos) {
             c.created = now();
             self.history.push_front(c);
@@ -607,8 +741,14 @@ impl Store {
     /// Deletes an image file when nothing points to it any more.
     fn forget_image(&self, content: &Content) {
         if let Some(file) = content.image_file() {
-            let used = self.history.iter().any(|c| c.content.image_file() == Some(file))
-                || self.favorites.iter().any(|f| f.content.image_file() == Some(file));
+            let used = self
+                .history
+                .iter()
+                .any(|c| c.content.image_file() == Some(file))
+                || self
+                    .favorites
+                    .iter()
+                    .any(|f| f.content.image_file() == Some(file));
             if !used && let Ok(path) = image_path(file) {
                 let _ = fs::remove_file(path);
             }
@@ -636,21 +776,34 @@ impl Store {
 
     /// Moves a favorite into `group`, placed before favorite `before` (or last).
     pub fn move_favorite(&mut self, id: u64, group: u64, before: Option<u64>) {
-        let Some(pos) = self.favorites.iter().position(|f| f.id == id) else { return };
+        let Some(pos) = self.favorites.iter().position(|f| f.id == id) else {
+            return;
+        };
         let mut f = self.favorites.remove(pos);
         f.group = group;
-        let at = before.and_then(|b| self.favorites.iter().position(|x| x.id == b)).unwrap_or(self.favorites.len());
+        let at = before
+            .and_then(|b| self.favorites.iter().position(|x| x.id == b))
+            .unwrap_or(self.favorites.len());
         self.favorites.insert(at, f);
     }
 
     /// Favorites in a group and in all of its sub-groups.
     pub fn favorite_count(&self, id: u64) -> usize {
-        self.favorites_in(id).len() + self.children(Some(id)).into_iter().map(|c| self.favorite_count(c)).sum::<usize>()
+        self.favorites_in(id).len()
+            + self
+                .children(Some(id))
+                .into_iter()
+                .map(|c| self.favorite_count(c))
+                .sum::<usize>()
     }
 
     /// Ids of the groups directly under `parent` (None = top level), in list order.
     pub fn children(&self, parent: Option<u64>) -> Vec<u64> {
-        self.groups.iter().filter(|g| g.parent == parent).map(|g| g.id).collect()
+        self.groups
+            .iter()
+            .filter(|g| g.parent == parent)
+            .map(|g| g.id)
+            .collect()
     }
 
     /// "Parent › Child" name, used where groups are listed flat.
@@ -658,7 +811,10 @@ impl Store {
         let mut names = Vec::new();
         let mut visited = HashSet::new();
         let mut cur = Some(id);
-        while let Some(g) = cur.filter(|&id| visited.insert(id)).and_then(|id| self.group(id)) {
+        while let Some(g) = cur
+            .filter(|&id| visited.insert(id))
+            .and_then(|id| self.group(id))
+        {
             names.push(g.name.as_str());
             cur = g.parent;
         }
@@ -671,7 +827,12 @@ impl Store {
         for child in self.children(Some(id)) {
             self.remove_group(child);
         }
-        let favs: Vec<u64> = self.favorites.iter().filter(|f| f.group == id).map(|f| f.id).collect();
+        let favs: Vec<u64> = self
+            .favorites
+            .iter()
+            .filter(|f| f.group == id)
+            .map(|f| f.id)
+            .collect();
         for f in favs {
             self.remove_favorite(f);
         }
@@ -681,7 +842,10 @@ impl Store {
     pub fn demo_history(&mut self) {
         let samples = [
             ("https://example.com/report/2026-q4", "Safari"),
-            ("Meeting notes: budget approved, delivery date December 12.", "Notes"),
+            (
+                "Meeting notes: budget approved, delivery date December 12.",
+                "Notes",
+            ),
             ("cargo build --release", "Terminal"),
             ("Hello, I've attached the file. Have a good day.", "Mail"),
             ("#FF8C42", "Figma"),
@@ -694,7 +858,9 @@ impl Store {
         ];
         let t = now();
         for (i, (text, app)) in samples.iter().enumerate().rev() {
-            let content = Content::Text { text: (*text).into() };
+            let content = Content::Text {
+                text: (*text).into(),
+            };
             let id = self.new_id();
             self.history.push_front(Clip {
                 id,
@@ -738,7 +904,10 @@ impl Store {
             if let Some(file) = f.content.image_file()
                 && let Ok(bytes) = image_path(file).and_then(fs::read)
             {
-                images.insert(file.to_string(), base64::engine::general_purpose::STANDARD.encode(bytes));
+                images.insert(
+                    file.to_string(),
+                    base64::engine::general_purpose::STANDARD.encode(bytes),
+                );
             }
         }
         Backup {
@@ -770,14 +939,24 @@ impl Store {
     /// (a group with the same name is filled, nothing is deleted).
     pub fn merge_backup(&mut self, b: Backup) -> ImportResult {
         use base64::Engine;
-        let mut out = ImportResult { groups_added: 0, favorites_added: 0 };
-        self.settings = Settings { wheel_key_v2: true, ..b.settings };
+        let mut out = ImportResult {
+            groups_added: 0,
+            favorites_added: 0,
+        };
+        self.settings = Settings {
+            wheel_key_v2: true,
+            ..b.settings
+        };
         self.settings.history_limit = self.settings.history_limit.clamp(HISTORY_MIN, HISTORY_MAX);
 
         let mut ids = HashMap::new();
         for g in &b.groups {
             let key = g.name.trim().to_lowercase();
-            let id = match self.groups.iter_mut().find(|x| x.name.trim().to_lowercase() == key) {
+            let id = match self
+                .groups
+                .iter_mut()
+                .find(|x| x.name.trim().to_lowercase() == key)
+            {
                 Some(x) => {
                     if x.hotkey.is_empty() {
                         x.hotkey = g.hotkey.clone();
@@ -786,7 +965,13 @@ impl Store {
                 }
                 None => {
                     let id = self.new_id();
-                    self.groups.push(Group { id, name: g.name.clone(), color: g.color, hotkey: g.hotkey.clone(), parent: None });
+                    self.groups.push(Group {
+                        id,
+                        name: g.name.clone(),
+                        color: g.color,
+                        hotkey: g.hotkey.clone(),
+                        parent: None,
+                    });
                     out.groups_added += 1;
                     id
                 }
@@ -794,15 +979,25 @@ impl Store {
             ids.insert(g.id, id);
         }
         for f in b.favorites {
-            let Some(&group) = ids.get(&f.group) else { continue };
+            let Some(&group) = ids.get(&f.group) else {
+                continue;
+            };
             if let Some(file) = f.content.image_file() {
-                let Some(data) = b.images.get(file) else { continue };
-                let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else { continue };
+                let Some(data) = b.images.get(file) else {
+                    continue;
+                };
+                let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+                    continue;
+                };
                 if save_image(file, &bytes).is_err() {
                     continue;
                 }
             }
-            if self.favorites.iter().any(|x| x.group == group && x.content == f.content) {
+            if self
+                .favorites
+                .iter()
+                .any(|x| x.group == group && x.content == f.content)
+            {
                 continue;
             }
             let id = self.new_id();
@@ -848,7 +1043,10 @@ pub fn score(hay_lower: &str, query: &str) -> Option<i32> {
     if !plain_query.is_empty() && alphanumeric(hay_lower).contains(&plain_query) {
         return Some(300);
     }
-    if query.split_whitespace().all(|term| hay_lower.contains(term)) {
+    if query
+        .split_whitespace()
+        .all(|term| hay_lower.contains(term))
+    {
         return Some(200);
     }
 
@@ -860,7 +1058,8 @@ pub fn score(hay_lower: &str, query: &str) -> Option<i32> {
     for ch in hay_lower.chars() {
         let matched = next == Some(ch);
         if matched {
-            let points = 2 * i32::from(previous_matched) + i32::from(word_start && ch.is_alphanumeric());
+            let points =
+                2 * i32::from(previous_matched) + i32::from(word_start && ch.is_alphanumeric());
             bonus = bonus.saturating_add(points);
             next = remaining.next();
             if next.is_none() {
@@ -931,7 +1130,11 @@ mod tests {
     /// The query as one lower-case phrase (outer spaces removed), or nothing when empty.
     fn terms(query: &str) -> Vec<String> {
         let q = query.trim();
-        if q.is_empty() { Vec::new() } else { vec![q.to_lowercase()] }
+        if q.is_empty() {
+            Vec::new()
+        } else {
+            vec![q.to_lowercase()]
+        }
     }
 
     #[test]
@@ -939,15 +1142,24 @@ mod tests {
         let mut store = Store::default();
         for id in 1..=11 {
             store.groups.push(Group {
-                id, name: id.to_string(), color: PALETTE[0], hotkey: String::new(),
+                id,
+                name: id.to_string(),
+                color: PALETTE[0],
+                hotkey: String::new(),
                 parent: (id > 1).then_some(id - 1),
             });
         }
         for group in [1, 2, 11] {
-            store.favorites.push(Favorite { group, ..Favorite::default() });
+            store.favorites.push(Favorite {
+                group,
+                ..Favorite::default()
+            });
         }
         assert_eq!(store.favorite_count(2), 2);
-        assert_eq!(store.group_path(11), "1 › 2 › 3 › 4 › 5 › 6 › 7 › 8 › 9 › 10 › 11");
+        assert_eq!(
+            store.group_path(11),
+            "1 › 2 › 3 › 4 › 5 › 6 › 7 › 8 › 9 › 10 › 11"
+        );
     }
 
     #[test]
@@ -957,6 +1169,7 @@ mod tests {
         let data = dir.join("data.json");
         let original = b"{invalid JSON";
         fs::write(&data, original).unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&data, fs::Permissions::from_mode(0o644)).unwrap();
 
         let store = Store::load_from(&dir, false);
@@ -965,15 +1178,30 @@ mod tests {
         assert!(store.favorites.is_empty());
         assert!(store.load_notice.is_some());
 
-        let backup = fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().path()).find(|path| {
-            path.file_name().unwrap().to_string_lossy().starts_with("data.json.corrupt-")
-        }).unwrap();
+        let backup = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("data.json.corrupt-")
+            })
+            .unwrap();
         assert_eq!(fs::read(&backup).unwrap(), original);
-        assert_eq!(fs::metadata(&backup).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         store.save_to(&dir);
         assert_eq!(fs::read(&backup).unwrap(), original);
-        assert_eq!(fs::metadata(&data).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&data).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert!(serde_json::from_slice::<Store>(&fs::read(&data).unwrap()).is_ok());
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -988,32 +1216,53 @@ mod tests {
 
         let current = copywheel_data_dir(&base);
         assert_eq!(current, base.join("CopyWheel"));
-        assert_eq!(std::fs::read(current.join("data.json")).unwrap(), b"test data");
-        assert_eq!(std::fs::read(current.join("images/test.png")).unwrap(), b"test image");
+        assert_eq!(
+            std::fs::read(current.join("data.json")).unwrap(),
+            b"test data"
+        );
+        assert_eq!(
+            std::fs::read(current.join("images/test.png")).unwrap(),
+            b"test image"
+        );
         assert!(!legacy.exists());
 
+        #[cfg(unix)]
         let images = current.join("images");
+        #[cfg(unix)]
         let image = images.join("test.png");
         let temp = current.join("data.json.tmp");
         fs::write(&temp, b"old temp data").unwrap();
+        #[cfg(unix)]
         for dir in [&current, &images] {
             fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
         }
+        #[cfg(unix)]
         for file in [&image, &temp] {
             fs::set_permissions(file, fs::Permissions::from_mode(0o644)).unwrap();
         }
         prepare_data_dir(&current).unwrap();
+        #[cfg(unix)]
         for dir in [&current, &images] {
-            assert_eq!(fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(
+                fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
         }
+        #[cfg(unix)]
         for file in [&image, &temp] {
-            assert_eq!(fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
 
         std::fs::create_dir(&legacy).unwrap();
         std::fs::write(legacy.join("data.json"), b"old data").unwrap();
         assert_eq!(copywheel_data_dir(&base), current);
-        assert_eq!(std::fs::read(legacy.join("data.json")).unwrap(), b"old data");
+        assert_eq!(
+            std::fs::read(legacy.join("data.json")).unwrap(),
+            b"old data"
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -1057,30 +1306,67 @@ mod tests {
         a.settings.history_limit = 800;
         a.groups[0].hotkey = "Ctrl+Alt+1".into();
         let gid = a.new_id();
-        a.groups.push(Group { id: gid, name: "Server".into(), color: PALETTE[3], hotkey: String::new(), parent: None });
+        a.groups.push(Group {
+            id: gid,
+            name: "Server".into(),
+            color: PALETTE[3],
+            hotkey: String::new(),
+            parent: None,
+        });
         let fid = a.new_id();
-        a.favorites.push(Favorite { id: fid, group: gid, title: "SSH".into(), content: Content::Text { text: "ssh x".into() }, ..Favorite::default() });
+        a.favorites.push(Favorite {
+            id: fid,
+            group: gid,
+            title: "SSH".into(),
+            content: Content::Text {
+                text: "ssh x".into(),
+            },
+            ..Favorite::default()
+        });
         let text = serde_json::to_string(&a.backup()).unwrap();
 
         let mut b = Store::first_run();
         let before = b.favorites.len();
         let r = b.merge_backup(serde_json::from_str(&text).unwrap());
-        assert_eq!(r, ImportResult { groups_added: 1, favorites_added: 1 });
+        assert_eq!(
+            r,
+            ImportResult {
+                groups_added: 1,
+                favorites_added: 1
+            }
+        );
         assert_eq!(b.favorites.len(), before + 1);
         assert_eq!(b.settings.history_limit, 800);
         assert_eq!(b.groups[0].hotkey, "Ctrl+Alt+1");
         // importing again adds nothing
         let r = b.merge_backup(serde_json::from_str(&text).unwrap());
-        assert_eq!(r, ImportResult { groups_added: 0, favorites_added: 0 });
+        assert_eq!(
+            r,
+            ImportResult {
+                groups_added: 0,
+                favorites_added: 0
+            }
+        );
 
         let path = std::env::temp_dir().join(format!("copywheel_test_{}.json", std::process::id()));
         fs::write(&path, b"old backup").unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         a.export_config(&path).unwrap();
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let mut c = Store::first_run();
         let r = c.import_config(&path).unwrap();
-        assert_eq!(r, ImportResult { groups_added: 1, favorites_added: 1 });
+        assert_eq!(
+            r,
+            ImportResult {
+                groups_added: 1,
+                favorites_added: 1
+            }
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1100,7 +1386,12 @@ mod tests {
         assert!(matches("meeting: budget approval", &t));
         assert!(matches("approval pending on the budget", &t));
         assert!(!matches("budget revision", &t));
-        let lower = clip_search_text(&Content::Text { text: "hello".into() }, Some("Safari"));
+        let lower = clip_search_text(
+            &Content::Text {
+                text: "hello".into(),
+            },
+            Some("Safari"),
+        );
         assert!(matches(&lower, &terms("safari")));
         assert!(matches("anything", &terms("")));
     }
@@ -1109,7 +1400,13 @@ mod tests {
     fn move_favorite_changes_group_and_order() {
         let mut s = Store::first_run();
         let g2 = s.new_id();
-        s.groups.push(Group { id: g2, name: "B".into(), color: PALETTE[1], hotkey: String::new(), parent: None });
+        s.groups.push(Group {
+            id: g2,
+            name: "B".into(),
+            color: PALETTE[1],
+            hotkey: String::new(),
+            parent: None,
+        });
         let ids: Vec<u64> = s.favorites.iter().map(|f| f.id).collect();
         let (a, b) = (ids[0], ids[1]);
         s.move_favorite(a, g2, None);
@@ -1148,21 +1445,29 @@ mod tests {
             "package toolkit: kernel update report",
         ]
         .map(|hay| score(hay, query).expect(hay));
-        assert!(scores.windows(2).all(|pair| pair[0] > pair[1]), "{scores:?}");
+        assert!(
+            scores.windows(2).all(|pair| pair[0] > pair[1]),
+            "{scores:?}"
+        );
         assert_eq!(score("anything", "   "), Some(0));
         assert_eq!(score("paket kur (rhel)", "xyz"), None);
     }
 
     #[test]
     fn search_matches_punctuation_in_mixed_case_content() {
-        let hay = Content::Text { text: "Paket kur (RHEL)".into() }.search_text();
+        let hay = Content::Text {
+            text: "Paket kur (RHEL)".into(),
+        }
+        .search_text();
         assert!(score(&hay, "paket kur rhel").is_some());
     }
 
     #[test]
     fn subsequence_rewards_runs_and_word_starts() {
         assert!(score("pk-er", "pkr").unwrap() > score("p-k-er", "pkr").unwrap());
-        assert!(score("paket kur (rhel)", "pkr").unwrap() > score("apaketakur arhel", "pkr").unwrap());
+        assert!(
+            score("paket kur (rhel)", "pkr").unwrap() > score("apaketakur arhel", "pkr").unwrap()
+        );
     }
 
     #[test]
@@ -1171,7 +1476,11 @@ mod tests {
         let favorite = "cache statistics rndc stats";
         assert!(score_favorite(group, favorite, "DNS cache").is_some());
         assert!(matches_favorite(group, favorite, &terms("dns cache")));
-        assert!(matches_favorite(group, favorite, &terms("stats bind cache")));
+        assert!(matches_favorite(
+            group,
+            favorite,
+            &terms("stats bind cache")
+        ));
         assert!(!matches_favorite(group, favorite, &terms("dns restart")));
         assert!(!matches_favorite(group, favorite, &terms("|")));
         assert!(matches_favorite("Linux", "grep error | sort", &terms("|")));
@@ -1193,7 +1502,10 @@ mod tests {
         }"#;
         let mut store: Store = serde_json::from_str(json).unwrap();
         assert_eq!((store.history[0].uses, store.history[0].last_used), (0, 0));
-        assert_eq!((store.favorites[0].uses, store.favorites[0].last_used), (0, 0));
+        assert_eq!(
+            (store.favorites[0].uses, store.favorites[0].last_used),
+            (0, 0)
+        );
         assert!(store.snippet_values.is_empty());
 
         let before = now();
@@ -1232,7 +1544,10 @@ mod tests {
         let saved: Store = serde_json::from_str(r#"{"settings":{"history_limit":750}}"#).unwrap();
         assert_eq!(saved.settings.history_limit, 750);
         assert_eq!(saved.settings.theme, Theme::System);
-        assert_eq!(serde_json::to_value(&saved.settings).unwrap()["theme"], "system");
+        assert_eq!(
+            serde_json::to_value(&saved.settings).unwrap()["theme"],
+            "system"
+        );
     }
 
     #[test]
@@ -1241,6 +1556,23 @@ mod tests {
         let s = Settings::default();
         assert!(s.hotkey_panel.parse::<HotKey>().is_ok());
         assert!(s.hotkey_wheel.parse::<HotKey>().is_ok());
+        assert!(s.hotkey_favorites.parse::<HotKey>().is_ok());
+        assert_ne!(s.hotkey_panel, s.hotkey_wheel);
+        assert_ne!(s.hotkey_wheel, s.hotkey_favorites);
+        assert_ne!(s.hotkey_panel, s.hotkey_favorites);
         assert!("Ctrl+Alt+Space".parse::<HotKey>().is_ok());
+    }
+
+    #[test]
+    fn settings_deserialize_with_and_without_launch_at_login() {
+        let legacy: Settings = serde_json::from_str(r#"{"history_limit": 250}"#).unwrap();
+        assert_eq!(legacy.history_limit, 250);
+        assert!(legacy.launch_at_login);
+
+        let disabled: Settings = serde_json::from_str(r#"{"launch_at_login": false}"#).unwrap();
+        assert!(!disabled.launch_at_login);
+
+        let enabled: Settings = serde_json::from_str(r#"{"launch_at_login": true}"#).unwrap();
+        assert!(enabled.launch_at_login);
     }
 }

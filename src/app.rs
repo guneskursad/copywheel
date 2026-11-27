@@ -10,24 +10,24 @@ mod wheel_draw;
 mod widgets;
 
 use crate::platform;
-use crate::store::{self, ago, Clip, Content, Favorite, Group, Store, Theme, PALETTE};
-use wheel::Src;
+use crate::store::{self, Clip, Content, Favorite, Group, PALETTE, Store, Theme, ago};
 use crate::watch::{self, Msg};
 use eframe::egui::{
-    self, pos2, vec2, Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Key, Layout, Margin,
-    Modifiers, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TextureHandle,
-    Ui, ViewportCommand,
+    self, Align, Align2, Color32, CornerRadius, FontId, Frame, Id, Key, Layout, Margin, Modifiers,
+    Pos2, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TextureHandle, Ui,
+    ViewportCommand, pos2, vec2,
 };
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use icons::*;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::{PI, TAU};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use icons::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use theme::{mix, palette, with_alpha};
+use wheel::Src;
 use widgets::*;
 
 pub const WIN_W: f32 = 760.0;
@@ -85,7 +85,15 @@ struct WheelState {
 
 impl WheelState {
     fn new(level: Level, opened: f64) -> Self {
-        Self { level, sel: 0, page: 0, item: None, number_panel: false, reset_card_scroll: false, opened }
+        Self {
+            level,
+            sel: 0,
+            page: 0,
+            item: None,
+            number_panel: false,
+            reset_card_scroll: false,
+            opened,
+        }
     }
 }
 
@@ -153,9 +161,21 @@ impl Hotkeys {
         self.registered.clear();
         self.map.clear();
         let mut list = vec![
-            (store.settings.hotkey_panel.clone(), HotAction::Panel, "Panel".to_string()),
-            (store.settings.hotkey_wheel.clone(), HotAction::Wheel, "Wheel".to_string()),
-            (store.settings.hotkey_favorites.clone(), HotAction::Favorites, "Favorites list".to_string()),
+            (
+                store.settings.hotkey_panel.clone(),
+                HotAction::Panel,
+                "Panel".to_string(),
+            ),
+            (
+                store.settings.hotkey_wheel.clone(),
+                HotAction::Wheel,
+                "Wheel".to_string(),
+            ),
+            (
+                store.settings.hotkey_favorites.clone(),
+                HotAction::Favorites,
+                "Favorites list".to_string(),
+            ),
         ];
         for g in &store.groups {
             list.push((g.hotkey.clone(), HotAction::Group(g.id), g.name.clone()));
@@ -173,7 +193,10 @@ impl Hotkeys {
                     }
                     Err(_) => errors.push(format!("{name}: \"{text}\" is already in use.")),
                 },
-                Err(_) => errors.push(format!("{name}: \"{text}\" is not a valid shortcut (e.g. Cmd+Shift+V).")),
+                Err(_) => errors.push(format!(
+                    "{name}: \"{text}\" is not a valid shortcut (e.g. {}).",
+                    store::default_hotkey_panel()
+                )),
             }
         }
         errors
@@ -232,6 +255,7 @@ pub struct App {
     confirm_group_delete: Option<u64>,
     confirm_clear: bool,
     backup_note: Option<(bool, String)>,
+    login_error: Option<String>,
     recording: Option<RecTarget>,
     textures: HashMap<String, Option<TextureHandle>>,
     /// Rows marked for a bulk action (history clip ids or favorite ids).
@@ -244,6 +268,8 @@ pub struct App {
     last_group: Option<u64>,
 
     visible: bool,
+    #[cfg(windows)]
+    transparent_ok: bool,
     #[cfg(target_os = "macos")]
     window_size: Option<egui::Vec2>,
     #[cfg(target_os = "macos")]
@@ -258,20 +284,33 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, shot: Option<PathBuf>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, shot: Option<PathBuf>, background: bool) -> Self {
         #[cfg(target_os = "macos")]
         platform::disable_window_shadow(cc, true);
+        #[cfg(windows)]
+        platform::register_window(cc);
+
+        #[cfg(windows)]
+        let transparent_ok = cc.gl.as_ref().is_none_or(|gl| {
+            use eframe::glow::HasContext;
+            // SAFETY: gl is the active OpenGL context created by eframe on the main thread.
+            unsafe {
+                let _ = gl.get_error();
+                let bits = gl.get_parameter_i32(eframe::glow::ALPHA_BITS);
+                gl.get_error() != eframe::glow::NO_ERROR || bits > 0
+            }
+        });
 
         let ctx = cc.egui_ctx.clone();
         setup_style(&ctx);
 
-        let shot_theme = shot.as_ref().and_then(|_| {
-            match std::env::var("COPYWHEEL_THEME").as_deref() {
-                Ok("light") => Some(Theme::Light),
-                Ok("dark") => Some(Theme::Dark),
-                _ => None,
-            }
-        });
+        let shot_theme =
+            shot.as_ref()
+                .and_then(|_| match std::env::var("COPYWHEEL_THEME").as_deref() {
+                    Ok("light") => Some(Theme::Light),
+                    Ok("dark") => Some(Theme::Dark),
+                    _ => None,
+                });
         let mut store = Store::load(shot.is_some());
         theme::apply(&ctx, shot_theme.unwrap_or(store.settings.theme));
         if shot.is_some() && store.load_notice.is_none() && store.history.is_empty() {
@@ -284,14 +323,25 @@ impl App {
             watch::spawn(tx.clone(), ctx.clone(), skip_concealed.clone());
         }
 
-        let mut hotkeys = Hotkeys { mgr: None, registered: Vec::new(), map: HashMap::new() };
+        let mut hotkeys = Hotkeys {
+            mgr: None,
+            registered: Vec::new(),
+            map: HashMap::new(),
+        };
         let mut hotkey_errors = Vec::new();
         let mut tray = None;
+        let mut login_error = None;
         if shot.is_none() {
             hotkeys.mgr = GlobalHotKeyManager::new().ok();
             hotkey_errors = hotkeys.apply(&store);
             install_hotkey_handler(tx.clone(), ctx.clone());
             tray = build_tray(tx.clone(), ctx.clone());
+            if let Err(err) = platform::apply_launch_at_login(store.settings.launch_at_login) {
+                login_error = Some(err);
+            }
+        }
+        if background {
+            platform::hide_app();
         }
 
         // Start view for testing pictures: wheel, favorites or settings.
@@ -305,7 +355,11 @@ impl App {
             hotkey_errors,
             _tray: tray,
             skip_concealed,
-            mode: if start.starts_with("wheel") { Mode::Wheel } else { Mode::Panel },
+            mode: if start.starts_with("wheel") {
+                Mode::Wheel
+            } else {
+                Mode::Panel
+            },
             tab: match start.as_str() {
                 "favorites" => Tab::Favorites,
                 "settings" => Tab::Settings,
@@ -323,9 +377,16 @@ impl App {
             // "wheel-list": the second group lit, keys in its list
             // "wheel-<n>": piece n lit (to see where its list card opens)
             wheel: if matches!(start.as_str(), "wheel-list" | "wheel-snippet") {
-                WheelState { sel: 1, item: Some(0), ..WheelState::new(Level::Root, 0.0) }
+                WheelState {
+                    sel: 1,
+                    item: Some(0),
+                    ..WheelState::new(Level::Root, 0.0)
+                }
             } else if let Some(n) = start.strip_prefix("wheel-").and_then(|s| s.parse().ok()) {
-                WheelState { sel: n, ..WheelState::new(Level::Root, 0.0) }
+                WheelState {
+                    sel: n,
+                    ..WheelState::new(Level::Root, 0.0)
+                }
             } else {
                 WheelState::new(Level::Root, 0.0)
             },
@@ -338,13 +399,16 @@ impl App {
             confirm_group_delete: None,
             confirm_clear: false,
             backup_note: None,
+            login_error,
             recording: None,
             textures: HashMap::new(),
             marks: HashSet::new(),
             anchor: None,
             marks_ctx: (Tab::History, String::new()),
             last_group: None,
-            visible: true,
+            visible: !background,
+            #[cfg(windows)]
+            transparent_ok,
             #[cfg(target_os = "macos")]
             window_size: None,
             #[cfg(target_os = "macos")]
@@ -363,7 +427,11 @@ impl App {
                     vec!["dig @{{resolver:9.9.9.9}} {{domain:example.org}} A".into()],
                     &HashMap::new(),
                 ),
-                request: ClipboardRequest { items: Vec::new(), paste: true, close: true },
+                request: ClipboardRequest {
+                    items: Vec::new(),
+                    paste: true,
+                    close: true,
+                },
                 return_focus: None,
             });
         }
@@ -405,18 +473,32 @@ impl App {
         };
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(w, h)));
         if let Some((x, y)) = platform::cursor_pos() {
-            let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(vec2(4000.0, 3000.0));
             let (mut px, mut py) = match mode {
                 Mode::Wheel => (x - w / 2.0, y - h / 2.0),
                 Mode::Panel => (x - w / 2.0, y - 30.0),
             };
+            #[cfg(windows)]
+            let (min_x, min_y, max_x, max_y) =
+                platform::cursor_monitor_rect().unwrap_or_else(|| {
+                    let monitor = ctx
+                        .input(|i| i.viewport().monitor_size)
+                        .unwrap_or(vec2(4000.0, 3000.0));
+                    (0.0, 0.0, monitor.x, monitor.y)
+                });
+            #[cfg(not(windows))]
+            let (min_x, min_y, max_x, max_y) = {
+                let monitor = ctx
+                    .input(|i| i.viewport().monitor_size)
+                    .unwrap_or(vec2(4000.0, 3000.0));
+                (0.0, 0.0, monitor.x, monitor.y)
+            };
             if mode == Mode::Panel {
-                px = px.clamp(0.0, (monitor.x - w).max(0.0));
-                py = py.clamp(0.0, (monitor.y - h).max(0.0));
+                px = px.clamp(min_x, (max_x - w).max(min_x));
+                py = py.clamp(min_y, (max_y - h).max(min_y));
             } else {
                 // keep the whole wheel and both places for its list on screen
-                px = px.clamp(-10.0, (monitor.x - w + 10.0).max(0.0));
-                py = py.clamp(-60.0, (monitor.y - h + 60.0).max(0.0));
+                px = px.clamp(min_x - 10.0, (max_x - w + 10.0).max(min_x - 10.0));
+                py = py.clamp(min_y - 60.0, (max_y - h + 60.0).max(min_y - 60.0));
             }
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos2(px, py)));
         }
@@ -447,7 +529,10 @@ impl App {
     }
 
     fn remember_wheel_transition(&mut self, previous_level: Level) {
-        if self.mode == Mode::Wheel && previous_level == Level::Root && self.wheel.level != Level::Root {
+        if self.mode == Mode::Wheel
+            && previous_level == Level::Root
+            && self.wheel.level != Level::Root
+        {
             let roots = self.store.children(None);
             let index = match self.wheel.level {
                 Level::Recent => Some(roots.len()),
@@ -478,8 +563,18 @@ impl App {
 
     fn source_content(&self, source: Src) -> Option<&Content> {
         match source {
-            Src::Clip(id) => self.store.history.iter().find(|c| c.id == id).map(|c| &c.content),
-            Src::Fav(id) => self.store.favorites.iter().find(|f| f.id == id).map(|f| &f.content),
+            Src::Clip(id) => self
+                .store
+                .history
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| &c.content),
+            Src::Fav(id) => self
+                .store
+                .favorites
+                .iter()
+                .find(|f| f.id == id)
+                .map(|f| &f.content),
             Src::Header(_) => None,
         }
     }
@@ -497,23 +592,36 @@ impl App {
         if self.shot.is_some() || self.pending_snippet.is_some() {
             return;
         }
-        let items: Vec<_> = sources.iter().filter_map(|&source| {
-            self.source_content(source).map(|content| (source, content.clone()))
-        }).collect();
+        let items: Vec<_> = sources
+            .iter()
+            .filter_map(|&source| {
+                self.source_content(source)
+                    .map(|content| (source, content.clone()))
+            })
+            .collect();
         if items.is_empty() {
             return;
         }
-        let templates: Vec<_> = items.iter().filter_map(|(source, content)| {
-            snippet_text(*source, content).map(str::to_owned)
-        }).collect();
-        let request = ClipboardRequest { items, paste, close };
+        let templates: Vec<_> = items
+            .iter()
+            .filter_map(|(source, content)| snippet_text(*source, content).map(str::to_owned))
+            .collect();
+        let request = ClipboardRequest {
+            items,
+            paste,
+            close,
+        };
         if templates.is_empty() {
             self.finish_clipboard(request);
             return;
         }
         let title = match request.items.as_slice() {
-            [(Src::Fav(id), _)] => self.store.favorites.iter()
-                .find(|favorite| favorite.id == *id).map_or("", |favorite| favorite.title.as_str()),
+            [(Src::Fav(id), _)] => self
+                .store
+                .favorites
+                .iter()
+                .find(|favorite| favorite.id == *id)
+                .map_or("", |favorite| favorite.title.as_str()),
             _ => "Fill favorite snippets",
         };
         self.pending_snippet = Some(PendingSnippet {
@@ -525,8 +633,14 @@ impl App {
     }
 
     fn draw_snippet_prompt(&mut self, ctx: &egui::Context) {
-        let Some(pending) = self.pending_snippet.as_mut() else { return };
-        let action = if pending.request.paste { "Paste" } else { "Copy" };
+        let Some(pending) = self.pending_snippet.as_mut() else {
+            return;
+        };
+        let action = if pending.request.paste {
+            "Paste"
+        } else {
+            "Copy"
+        };
         let return_focus = pending.return_focus;
         match forms::snippet_prompt(ctx, &mut pending.prompt, action) {
             forms::SnippetOutcome::Pending => return,
@@ -538,7 +652,9 @@ impl App {
                 let values: HashMap<_, _> = values.into_iter().collect();
                 for (source, content) in &mut request.items {
                     if let Some(text) = snippet_text(*source, content) {
-                        *content = Content::Text { text: crate::snippet::fill(text, &values) };
+                        *content = Content::Text {
+                            text: crate::snippet::fill(text, &values),
+                        };
                     }
                 }
                 if self.shot.is_none() {
@@ -548,7 +664,9 @@ impl App {
                 }
             }
         }
-        if self.visible && let Some(id) = return_focus {
+        if self.visible
+            && let Some(id) = return_focus
+        {
             ctx.memory_mut(|memory| memory.request_focus(id));
         }
         ctx.request_repaint();
@@ -558,19 +676,27 @@ impl App {
         let copied = match request.items.as_slice() {
             [(_, content)] => self.copy_to_clipboard(content.clone()),
             items => {
-                let texts: Option<Vec<_>> = items.iter().map(|(_, content)| match content {
-                    Content::Text { text } => Some(text.as_str()),
-                    Content::Image { .. } => None,
-                }).collect();
+                let texts: Option<Vec<_>> = items
+                    .iter()
+                    .map(|(_, content)| match content {
+                        Content::Text { text } => Some(text.as_str()),
+                        Content::Image { .. } => None,
+                    })
+                    .collect();
                 if let Some(texts) = texts {
-                    self.copy_to_clipboard(Content::Text { text: texts.join("\n") })
+                    self.copy_to_clipboard(Content::Text {
+                        text: texts.join("\n"),
+                    })
                 } else {
                     let contents: Vec<_> = items.iter().map(|(_, content)| content).collect();
                     let copied = panel::copy_multiple_items(&contents);
                     if copied {
-                        self.own_paste = contents.iter().copied()
+                        self.own_paste = contents
+                            .iter()
+                            .copied()
                             .find(|content| matches!(content, Content::Text { .. }))
-                            .or_else(|| contents.first().copied()).cloned();
+                            .or_else(|| contents.first().copied())
+                            .cloned();
                     }
                     copied
                 }
@@ -600,14 +726,26 @@ impl App {
             return;
         }
         let row = match source {
-            Src::Clip(id) => self.store.history.iter().enumerate().find(|(_, c)| c.id == id)
+            Src::Clip(id) => self
+                .store
+                .history
+                .iter()
+                .enumerate()
+                .find(|(_, c)| c.id == id)
                 .map(|(index, clip)| DeletedRow::Clip(index, clip.clone())),
-            Src::Fav(id) => self.store.favorites.iter().enumerate().find(|(_, f)| f.id == id)
+            Src::Fav(id) => self
+                .store
+                .favorites
+                .iter()
+                .enumerate()
+                .find(|(_, f)| f.id == id)
                 .map(|(index, favorite)| DeletedRow::Favorite(index, favorite.clone())),
             Src::Header(_) => None,
         };
         if let Some(row) = row {
-            let image = row.content().image_file()
+            let image = row
+                .content()
+                .image_file()
                 .and_then(|file| store::image_path(file).and_then(std::fs::read).ok());
             match source {
                 Src::Clip(id) => self.store.remove_clip(id),
@@ -620,7 +758,9 @@ impl App {
     }
 
     fn undo_delete(&mut self) {
-        let Some(deleted) = self.deleted.take() else { return };
+        let Some(deleted) = self.deleted.take() else {
+            return;
+        };
         if let (Some(file), Some(bytes)) = (deleted.row.content().image_file(), &deleted.image)
             && store::save_image(file, bytes).is_err()
         {
@@ -629,13 +769,17 @@ impl App {
         }
         match deleted.row {
             DeletedRow::Clip(index, clip) => {
-                self.store.history.insert(index.min(self.store.history.len()), clip);
+                self.store
+                    .history
+                    .insert(index.min(self.store.history.len()), clip);
             }
             DeletedRow::Favorite(index, mut favorite) => {
                 if self.store.group(favorite.group).is_none() {
                     favorite.group = self.default_group();
                 }
-                self.store.favorites.insert(index.min(self.store.favorites.len()), favorite);
+                self.store
+                    .favorites
+                    .insert(index.min(self.store.favorites.len()), favorite);
             }
         }
         self.dirty = true;
@@ -663,10 +807,15 @@ impl App {
                     // instead of adding it again (features.moveCopiedSnapshotToTheTop).
                     if let Some(own) = self.own_paste.take() {
                         let same = match (&own, &content) {
-                            (Content::Image { w, h, .. }, Content::Image { w: w2, h: h2, .. }) => w == w2 && h == h2,
+                            (Content::Image { w, h, .. }, Content::Image { w: w2, h: h2, .. }) => {
+                                w == w2 && h == h2
+                            }
                             (a, b) => a == b,
                         };
-                        if same && self.store.settings.move_used_to_top && self.store.bring_to_top(&own) {
+                        if same
+                            && self.store.settings.move_used_to_top
+                            && self.store.bring_to_top(&own)
+                        {
                             self.dirty = true;
                             continue;
                         }
@@ -681,7 +830,9 @@ impl App {
                         ctx.send_viewport_cmd(ViewportCommand::Focus);
                         continue;
                     }
-                    let Some(action) = self.hotkeys.map.get(&id).copied() else { continue };
+                    let Some(action) = self.hotkeys.map.get(&id).copied() else {
+                        continue;
+                    };
                     if action == HotAction::Panel && self.visible && self.mode == Mode::Panel {
                         self.switch_panel_tab();
                         ctx.send_viewport_cmd(ViewportCommand::Focus);
@@ -691,19 +842,29 @@ impl App {
                         HotAction::Panel | HotAction::Favorites => (Mode::Panel, Level::Root, None),
                         HotAction::Wheel => (Mode::Wheel, Level::Root, None),
                         HotAction::Group(g) => {
-                            let (level, group_panel) = wheel::group_hotkey_destination(&self.store, g);
+                            let (level, group_panel) =
+                                wheel::group_hotkey_destination(&self.store, g);
                             (Mode::Wheel, level, group_panel)
                         }
                     };
-                    let want_tab = if action == HotAction::Favorites { Tab::Favorites } else { Tab::History };
-                    let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
-                    let same = self.mode == mode && match mode {
-                        Mode::Panel => self.tab == want_tab,
-                        Mode::Wheel => self.wheel.level == level && group_panel.is_none_or(|index| {
-                            self.wheel.number_panel && self.wheel.page == index / PER_PAGE
-                                && self.wheel.sel == index % PER_PAGE
-                        }),
+                    let want_tab = if action == HotAction::Favorites {
+                        Tab::Favorites
+                    } else {
+                        Tab::History
                     };
+                    let focused = ctx.input(|i| i.viewport().focused).unwrap_or(false);
+                    let same = self.mode == mode
+                        && match mode {
+                            Mode::Panel => self.tab == want_tab,
+                            Mode::Wheel => {
+                                self.wheel.level == level
+                                    && group_panel.is_none_or(|index| {
+                                        self.wheel.number_panel
+                                            && self.wheel.page == index / PER_PAGE
+                                            && self.wheel.sel == index % PER_PAGE
+                                    })
+                            }
+                        };
                     if self.visible && focused && same {
                         self.hide();
                     } else {
@@ -736,8 +897,25 @@ impl App {
                     }
                     _ => {}
                 },
+                #[cfg(windows)]
+                Msg::TrayToggle => {
+                    if self.visible {
+                        self.hide();
+                    } else {
+                        self.tab = Tab::History;
+                        self.show(ctx, Mode::Panel, Level::Root);
+                    }
+                }
             }
         }
+    }
+
+    fn apply_launch_at_login(&mut self) {
+        if self.shot.is_some() {
+            return;
+        }
+        self.login_error =
+            platform::apply_launch_at_login(self.store.settings.launch_at_login).err();
     }
 
     fn reapply_hotkeys(&mut self) {
@@ -800,17 +978,28 @@ impl App {
     }
 
     fn favorite_matches(&self) -> Vec<(u64, Vec<usize>)> {
-        let mut groups: Vec<_> = self.group_order().into_iter().map(|(id, _)| (id, Vec::new())).collect();
+        let mut groups: Vec<_> = self
+            .group_order()
+            .into_iter()
+            .map(|(id, _)| (id, Vec::new()))
+            .collect();
         let searching = !self.query.trim().is_empty();
         let indices = if searching {
             self.favorite_search_matches()
         } else {
             (0..self.store.favorites.len()).collect()
         };
-        let by_group: HashMap<_, _> = groups.iter().enumerate().map(|(i, (id, _))| (*id, i)).collect();
+        let by_group: HashMap<_, _> = groups
+            .iter()
+            .enumerate()
+            .map(|(i, (id, _))| (*id, i))
+            .collect();
         for index in indices {
             let group = self.store.favorites[index].group;
-            if let Some(&i) = by_group.get(&group).filter(|_| searching || self.group_open(group)) {
+            if let Some(&i) = by_group
+                .get(&group)
+                .filter(|_| searching || self.group_open(group))
+            {
                 groups[i].1.push(index);
             }
         }
@@ -818,16 +1007,25 @@ impl App {
     }
 
     fn favorite_search_matches(&self) -> Vec<usize> {
-        let paths: HashMap<_, _> = self.store.groups.iter()
+        let paths: HashMap<_, _> = self
+            .store
+            .groups
+            .iter()
             .map(|g| (g.id, self.store.group_path(g.id)))
             .collect();
         let now = store::now();
-        let mut scored: Vec<_> = self.store.favorites.iter().enumerate().filter_map(|(index, favorite)| {
-            let path = paths.get(&favorite.group).map_or("", String::as_str);
-            let score = store::score_favorite(path, &favorite.lower, &self.query)?;
-            let frecency = store::frecency(favorite.uses, favorite.last_used, now);
-            Some((index, score, frecency))
-        }).collect();
+        let mut scored: Vec<_> = self
+            .store
+            .favorites
+            .iter()
+            .enumerate()
+            .filter_map(|(index, favorite)| {
+                let path = paths.get(&favorite.group).map_or("", String::as_str);
+                let score = store::score_favorite(path, &favorite.lower, &self.query)?;
+                let frecency = store::frecency(favorite.uses, favorite.last_used, now);
+                Some((index, score, frecency))
+            })
+            .collect();
         scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.total_cmp(&a.2)));
         scored.into_iter().map(|(index, _, _)| index).collect()
     }
@@ -841,7 +1039,9 @@ impl App {
 
     /// Drops the marks when the tab or the search changed under them.
     fn check_marks(&mut self) {
-        if !self.marks.is_empty() && (self.marks_ctx.0 != self.tab || self.marks_ctx.1 != self.query) {
+        if !self.marks.is_empty()
+            && (self.marks_ctx.0 != self.tab || self.marks_ctx.1 != self.query)
+        {
             self.clear_marks();
         }
     }
@@ -860,12 +1060,24 @@ impl App {
         }
         let id = self.store.new_id();
         let title = content.preview(28);
-        self.store.favorites.push(Favorite { id, group, title, content, lower: String::new(), ..Default::default() });
+        self.store.favorites.push(Favorite {
+            id,
+            group,
+            title,
+            content,
+            lower: String::new(),
+            ..Default::default()
+        });
     }
 }
 
 impl eframe::App for App {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        #[cfg(windows)]
+        if !self.transparent_ok {
+            return visuals.panel_fill.to_normalized_gamma_f32();
+        }
+        let _ = visuals;
         theme::TRANSPARENT.to_normalized_gamma_f32()
     }
 
@@ -873,7 +1085,10 @@ impl eframe::App for App {
         #[cfg(target_os = "macos")]
         {
             let size = ctx.input(|i| i.screen_rect().size() * i.pixels_per_point());
-            let resized = self.window_size.replace(size).is_some_and(|previous| previous != size);
+            let resized = self
+                .window_size
+                .replace(size)
+                .is_some_and(|previous| previous != size);
             let shown = std::mem::take(&mut self.refresh_window_shadow);
             platform::disable_window_shadow(_frame, resized || shown);
         }
@@ -895,7 +1110,8 @@ impl eframe::App for App {
         }
         self.was_focused = focused;
 
-        let wheel_search_focused = self.mode == Mode::Wheel && self.pending_snippet.is_none()
+        let wheel_search_focused = self.mode == Mode::Wheel
+            && self.pending_snippet.is_none()
             && ctx.memory(|memory| memory.has_focus(wheel::search_id()));
         match self.mode {
             Mode::Panel => self.draw_panel(ctx),
@@ -959,7 +1175,11 @@ impl eframe::App for App {
             });
             if let Some(img) = shot {
                 let [w, h] = img.size;
-                let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
+                let bytes: Vec<u8> = img
+                    .pixels
+                    .iter()
+                    .flat_map(|c| c.to_srgba_unmultiplied())
+                    .collect();
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
@@ -1000,34 +1220,101 @@ fn install_hotkey_handler(tx: Sender<Msg>, ctx: egui::Context) {
 fn build_tray(tx: Sender<Msg>, ctx: egui::Context) -> Option<tray_icon::TrayIcon> {
     use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     let menu = Menu::new();
-    let panel = MenuItem::with_id("panel", "Open history", true, None);
-    let wheel = MenuItem::with_id("wheel", "Open favorites wheel", true, None);
-    let favs = MenuItem::with_id("favorites", "Edit favorites", true, None);
-    let settings = MenuItem::with_id("settings", "Settings…", true, None);
-    let quit = MenuItem::with_id("quit", "Quit", true, None);
-    let _ = menu.append_items(&[&panel, &wheel, &favs, &PredefinedMenuItem::separator(), &settings, &quit]);
+    #[cfg(windows)]
+    {
+        let open = MenuItem::with_id("panel", "Open", true, None);
+        let wheel = MenuItem::with_id("wheel", "Open favorites wheel", true, None);
+        let settings = MenuItem::with_id("settings", "Settings…", true, None);
+        let quit = MenuItem::with_id("quit", "Quit", true, None);
+        let _ = menu.append_items(&[
+            &open,
+            &wheel,
+            &PredefinedMenuItem::separator(),
+            &settings,
+            &quit,
+        ]);
+    }
+    #[cfg(not(windows))]
+    {
+        let panel = MenuItem::with_id("panel", "Open history", true, None);
+        let wheel = MenuItem::with_id("wheel", "Open favorites wheel", true, None);
+        let favs = MenuItem::with_id("favorites", "Edit favorites", true, None);
+        let settings = MenuItem::with_id("settings", "Settings…", true, None);
+        let quit = MenuItem::with_id("quit", "Quit", true, None);
+        let _ = menu.append_items(&[
+            &panel,
+            &wheel,
+            &favs,
+            &PredefinedMenuItem::separator(),
+            &settings,
+            &quit,
+        ]);
+    }
+    let tx_menu = tx.clone();
+    let ctx_menu = ctx.clone();
     MenuEvent::set_event_handler(Some(Arc::new(move |e: MenuEvent| {
-        let _ = tx.send(Msg::Menu(e.id().0.clone()));
-        platform::show_app();
-        ctx.request_repaint();
+        let id = e.id().0.clone();
+        let should_show = id != "quit";
+        let _ = tx_menu.send(Msg::Menu(id));
+        if should_show {
+            platform::show_app();
+        }
+        ctx_menu.request_repaint();
     })));
-    // Drawn at twice the menu-bar size so it stays sharp on Retina screens.
-    let icon = tray_icon::Icon::from_rgba(crate::art::logo_rgba(44, crate::art::Style::Template), 44, 44).ok()?;
-    tray_icon::TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
-        .with_icon_templated(icon)
-        .with_tooltip(crate::DISPLAY_NAME)
-        .build()
-        .ok()
+    #[cfg(windows)]
+    {
+        tray_icon::TrayIconEvent::set_event_handler(Some(move |event| {
+            if let tray_icon::TrayIconEvent::Click {
+                button: tray_icon::MouseButton::Left,
+                button_state: tray_icon::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let _ = tx.send(Msg::TrayToggle);
+                ctx.request_repaint();
+            }
+        }));
+    }
+    #[cfg(target_os = "macos")]
+    let builder = {
+        // Drawn at twice the menu-bar size so it stays sharp on Retina screens.
+        let icon = tray_icon::Icon::from_rgba(
+            crate::art::logo_rgba(44, crate::art::Style::Template),
+            44,
+            44,
+        )
+        .ok()?;
+        tray_icon::TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_icon_templated(icon)
+            .with_tooltip(crate::DISPLAY_NAME)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let builder = {
+        let icon =
+            tray_icon::Icon::from_rgba(crate::art::logo_rgba(32, crate::art::Style::Tile), 32, 32)
+                .ok()?;
+        let builder = tray_icon::TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_icon(icon)
+            .with_tooltip(crate::DISPLAY_NAME);
+        #[cfg(windows)]
+        let builder = builder.with_menu_on_left_click(false);
+        builder
+    };
+    builder.build().ok()
 }
 
 fn history_order(store: &Store, query: &str) -> Vec<usize> {
     if query.trim().is_empty() {
         return (0..store.history.len()).collect();
     }
-    let mut scored: Vec<_> = store.history.iter().enumerate().filter_map(|(index, clip)| {
-        Some((index, store::score(&clip.lower, query)?, clip.created))
-    }).collect();
+    let mut scored: Vec<_> = store
+        .history
+        .iter()
+        .enumerate()
+        .filter_map(|(index, clip)| Some((index, store::score(&clip.lower, query)?, clip.created)))
+        .collect();
     scored.sort_by_key(|&(_, score, created)| std::cmp::Reverse((score, created)));
     scored.into_iter().map(|(index, _, _)| index).collect()
 }
@@ -1039,10 +1326,19 @@ mod panel_search_tests {
     #[test]
     fn history_search_ranks_phrase_before_recency() {
         let mut store = Store::first_run();
-        for (created, text) in [(80, "find the needle"), (20, "needle old"), (40, "needle new")] {
+        for (created, text) in [
+            (80, "find the needle"),
+            (20, "needle old"),
+            (40, "needle new"),
+        ] {
             let content = Content::Text { text: text.into() };
             let id = store.new_id();
-            store.history.push_back(store::Clip { id, content, created, ..Default::default() });
+            store.history.push_back(store::Clip {
+                id,
+                content,
+                created,
+                ..Default::default()
+            });
         }
         store.reindex();
         assert_eq!(history_order(&store, "  NEEDLE "), vec![2, 1, 0]);
@@ -1055,11 +1351,17 @@ mod clipboard_request_tests {
 
     #[test]
     fn only_favorite_text_with_valid_variables_is_templated() {
-        let content = Content::Text { text: "{{host:local}}".into() };
+        let content = Content::Text {
+            text: "{{host:local}}".into(),
+        };
         assert_eq!(snippet_text(Src::Fav(2), &content), Some("{{host:local}}"));
         assert_eq!(snippet_text(Src::Clip(2), &content), None);
         assert_eq!(snippet_text(Src::Fav(2), &Content::default()), None);
-        let image = Content::Image { file: "{{host}}".into(), w: 1, h: 1 };
+        let image = Content::Image {
+            file: "{{host}}".into(),
+            w: 1,
+            h: 1,
+        };
         assert_eq!(snippet_text(Src::Fav(2), &image), None);
     }
 }

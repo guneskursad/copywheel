@@ -26,11 +26,17 @@ impl SnippetPrompt {
                 }
             }
         }
-        let fields = names.into_iter().map(|name| {
-            let value = last.get(&name).cloned()
-                .or_else(|| defaults.remove(&name).flatten()).unwrap_or_default();
-            (name, value)
-        }).collect();
+        let fields = names
+            .into_iter()
+            .map(|name| {
+                let value = last
+                    .get(&name)
+                    .cloned()
+                    .or_else(|| defaults.remove(&name).flatten())
+                    .unwrap_or_default();
+                (name, value)
+            })
+            .collect();
         Self {
             title: title.to_owned(),
             templates,
@@ -41,7 +47,9 @@ impl SnippetPrompt {
     }
 
     fn preview(&self, font_id: FontId, color: Color32, accent: Color32) -> egui::text::LayoutJob {
-        let values: HashMap<_, _> = self.fields.iter()
+        let values: HashMap<_, _> = self
+            .fields
+            .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect();
         let normal = egui::TextFormat::simple(font_id.clone(), color);
@@ -54,9 +62,16 @@ impl SnippetPrompt {
             let mut end = 0;
             for placeholder in snippet::placeholders(template) {
                 job.append(&template[end..placeholder.range.start], 0.0, normal.clone());
-                match values.get(placeholder.name).filter(|value| !value.is_empty()) {
+                match values
+                    .get(placeholder.name)
+                    .filter(|value| !value.is_empty())
+                {
                     Some(value) => job.append(value, 0.0, normal.clone()),
-                    None => job.append(&format!("{{{{{}}}}}", placeholder.name), 0.0, unfilled.clone()),
+                    None => job.append(
+                        &format!("{{{{{}}}}}", placeholder.name),
+                        0.0,
+                        unfilled.clone(),
+                    ),
                 }
                 end = placeholder.range.end;
             }
@@ -73,14 +88,22 @@ pub(crate) enum SnippetOutcome {
 }
 
 /// Draw each frame while active. Discard the prompt after Submit or Cancel.
-pub(crate) fn snippet_prompt(ctx: &egui::Context, p: &mut SnippetPrompt, action: &str) -> SnippetOutcome {
+pub(crate) fn snippet_prompt(
+    ctx: &egui::Context,
+    p: &mut SnippetPrompt,
+    action: &str,
+) -> SnippetOutcome {
     let colors = palette(ctx);
     let opening = std::mem::take(&mut p.opening);
     let (cancel_key, submit_key, backward, forward) = ctx.input_mut(|input| {
         if opening {
             // Space and unmodified wheel digits also emit text when activating an item.
-            input.events.retain(|event| !matches!(event,
-                egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Ime(_)));
+            input.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Ime(_)
+                )
+            });
         }
         let cancel = input.consume_key(Modifiers::NONE, Key::Escape);
         let submit = input.consume_key(Modifiers::NONE, Key::Enter);
@@ -126,7 +149,8 @@ pub(crate) fn snippet_prompt(ctx: &egui::Context, p: &mut SnippetPrompt, action:
                     ui.visuals_mut().selection.stroke = Stroke::new(1.5_f32, colors.accent);
                     let mut focus_field = None;
                     for (index, (name, value)) in p.fields.iter_mut().enumerate() {
-                        let label = ui.label(RichText::new(name.as_str()).size(12.0).color(colors.dim));
+                        let label =
+                            ui.label(RichText::new(name.as_str()).size(12.0).color(colors.dim));
                         let id = Id::new(("snippet_field", index));
                         if opening && !tabbing && index == p.focus {
                             ui.memory_mut(|memory| memory.request_focus(id));
@@ -166,9 +190,15 @@ pub(crate) fn snippet_prompt(ctx: &egui::Context, p: &mut SnippetPrompt, action:
                 submit |= accent_button(ui, action).clicked();
                 cancel |= ui.button("Cancel").clicked();
             });
-            ui.label(RichText::new(format!("Tab next · Enter {action} · Esc cancel")).size(11.0).color(colors.dim));
+            ui.label(
+                RichText::new(format!("Tab next · Enter {action} · Esc cancel"))
+                    .size(11.0)
+                    .color(colors.dim),
+            );
 
-            if let Some(field) = focus_field && !field.has_focus() {
+            if let Some(field) = focus_field
+                && !field.has_focus()
+            {
                 field.request_focus();
             }
         });
@@ -185,35 +215,67 @@ pub(crate) fn snippet_prompt(ctx: &egui::Context, p: &mut SnippetPrompt, action:
 impl App {
     pub(super) fn editor_window(&mut self, ctx: &egui::Context) {
         let colors = palette(ctx);
-        let Some(ed) = self.editor.as_mut() else { return };
+        let Some(ed) = self.editor.as_mut() else {
+            return;
+        };
         let mut save = false;
         let mut cancel = false;
-        let groups: Vec<(u64, String)> = self.store.groups.iter().map(|g| (g.id, self.store.group_path(g.id))).collect();
-        let title = if ed.id.is_some() { "Edit favorite" } else { "Add favorite" };
+        let groups: Vec<(u64, String)> = self
+            .store
+            .groups
+            .iter()
+            .map(|g| (g.id, self.store.group_path(g.id)))
+            .collect();
+        let title = if ed.id.is_some() {
+            "Edit favorite"
+        } else {
+            "Add favorite"
+        };
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .fixed_size([340.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(RichText::new("Title (shown on the wheel)").size(12.0).color(colors.dim));
-                ui.add(TextEdit::singleline(&mut ed.title).desired_width(f32::INFINITY).hint_text("E.g. email signature"));
+                ui.label(
+                    RichText::new("Title (shown on the wheel)")
+                        .size(12.0)
+                        .color(colors.dim),
+                );
+                ui.add(
+                    TextEdit::singleline(&mut ed.title)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("E.g. email signature"),
+                );
                 ui.add_space(6.0);
                 ui.label(RichText::new("Group").size(12.0).color(colors.dim));
-                let current = groups.iter().find(|(id, _)| *id == ed.group).map(|(_, n)| n.clone()).unwrap_or_default();
-                egui::ComboBox::from_id_salt("fav_group").selected_text(current).width(320.0).show_ui(ui, |ui| {
-                    for (id, name) in &groups {
-                        ui.selectable_value(&mut ed.group, *id, name);
-                    }
-                });
+                let current = groups
+                    .iter()
+                    .find(|(id, _)| *id == ed.group)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_default();
+                egui::ComboBox::from_id_salt("fav_group")
+                    .selected_text(current)
+                    .width(320.0)
+                    .show_ui(ui, |ui| {
+                        for (id, name) in &groups {
+                            ui.selectable_value(&mut ed.group, *id, name);
+                        }
+                    });
                 ui.add_space(6.0);
                 match &ed.content {
                     Content::Text { .. } => {
                         ui.label(RichText::new("Content").size(12.0).color(colors.dim));
-                        ui.add(TextEdit::multiline(&mut ed.text).desired_rows(5).desired_width(f32::INFINITY));
+                        ui.add(
+                            TextEdit::multiline(&mut ed.text)
+                                .desired_rows(5)
+                                .desired_width(f32::INFINITY),
+                        );
                     }
                     Content::Image { w, h, .. } => {
-                        ui.label(RichText::new(format!("Content: image {w}×{h}")).color(colors.dim));
+                        ui.label(
+                            RichText::new(format!("Content: image {w}×{h}")).color(colors.dim),
+                        );
                     }
                 }
                 ui.add_space(8.0);
@@ -234,13 +296,21 @@ impl App {
         }
         let Some(ed) = self.editor.take() else { return };
         let content = match ed.content {
-            Content::Text { .. } => Content::Text { text: ed.text.clone() },
+            Content::Text { .. } => Content::Text {
+                text: ed.text.clone(),
+            },
             other => other,
         };
-        if let Content::Text { text } = &content && text.is_empty() {
+        if let Content::Text { text } = &content
+            && text.is_empty()
+        {
             return;
         }
-        let title = if ed.title.trim().is_empty() { content.preview(28) } else { ed.title.trim().to_string() };
+        let title = if ed.title.trim().is_empty() {
+            content.preview(28)
+        } else {
+            ed.title.trim().to_string()
+        };
         self.last_group = Some(ed.group);
         match ed.id {
             Some(id) => {
@@ -252,7 +322,14 @@ impl App {
             }
             None => {
                 let id = self.store.new_id();
-                self.store.favorites.push(Favorite { id, group: ed.group, title, content, lower: String::new(), ..Default::default() });
+                self.store.favorites.push(Favorite {
+                    id,
+                    group: ed.group,
+                    title,
+                    content,
+                    lower: String::new(),
+                    ..Default::default()
+                });
             }
         }
         self.store.reindex();
@@ -262,6 +339,7 @@ impl App {
     pub(super) fn settings_page(&mut self, ui: &mut Ui) {
         let colors = palette(ui.ctx());
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            section(ui, "General");
             ui.horizontal(|ui| {
                 ui.label("Appearance");
                 let current = self.shot_theme.unwrap_or(self.store.settings.theme);
@@ -273,6 +351,13 @@ impl App {
                     ui.ctx().request_repaint();
                 }
             });
+            if ui.checkbox(&mut self.store.settings.launch_at_login, "Start CopyWheel at login").changed() {
+                self.dirty = true;
+                self.apply_launch_at_login();
+            }
+            if let Some(err) = &self.login_error {
+                ui.label(RichText::new(format!("⚠ {err}")).size(11.5).color(colors.error));
+            }
 
             section(ui, "History");
             ui.horizontal(|ui| {
@@ -339,7 +424,10 @@ impl App {
                 self.start_recording(t);
             }
             ui.label(
-                RichText::new("Click Change, then press the new shortcut (e.g. Cmd+Shift+V). To set a group shortcut, click its ✏ button in Favorites.")
+                RichText::new(format!(
+                    "Click Change, then press the new shortcut (e.g. {}). To set a group shortcut, click its ✏ button in Favorites.",
+                    store::default_hotkey_panel()
+                ))
                     .size(11.5)
                     .color(colors.dim),
             );
@@ -360,21 +448,25 @@ impl App {
             if ui.checkbox(&mut s.hide_on_blur, "Hide the panel when clicking outside").changed() {
                 self.dirty = true;
             }
-            let ok = platform::accessibility_ok();
-            ui.horizontal(|ui| {
-                if ok {
-                    ui.label(RichText::new("✔ Accessibility permission granted").size(12.0).color(colors.success));
-                } else {
-                    let warn = "⚠ Auto-paste needs Accessibility permission";
-                    ui.label(RichText::new(warn).size(12.0).color(colors.warning));
-                    if ui.button("Grant access…").clicked() {
-                        platform::open_accessibility_settings();
+            #[cfg(target_os = "macos")]
+            {
+                let ok = platform::accessibility_ok();
+                ui.horizontal(|ui| {
+                    if ok {
+                        ui.label(RichText::new("✔ Accessibility permission granted").size(12.0).color(colors.success));
+                    } else {
+                        let warn = "⚠ Auto-paste needs Accessibility permission";
+                        ui.label(RichText::new(warn).size(12.0).color(colors.warning));
+                        if ui.button("Grant access…").clicked() {
+                            platform::open_accessibility_settings();
+                        }
                     }
-                }
-            });
+                });
+            }
 
             section(ui, "Data");
-            ui.label(RichText::new("Exports contain favorites in plain text. Clipboard history stays on this Mac.")
+            let device = if cfg!(target_os = "macos") { "this Mac" } else { "this PC" };
+            ui.label(RichText::new(format!("Exports contain favorites in plain text. Clipboard history stays on {device}."))
                 .size(11.5).color(colors.warning));
             ui.horizontal(|ui| {
                 if small_button(ui, "Export settings…").clicked() && self.shot.is_none() {
@@ -407,6 +499,7 @@ impl App {
                             Ok(res) => {
                                 self.skip_concealed.store(self.store.settings.skip_concealed, Ordering::Relaxed);
                                 self.reapply_hotkeys();
+                                self.apply_launch_at_login();
                                 self.store.save();
                                 self.dirty = false;
                                 self.backup_note = Some((
@@ -444,31 +537,55 @@ mod snippet_prompt_tests {
     fn batch_prefills_shared_fields_in_first_use_order() {
         let prompt = SnippetPrompt::new(
             "Favorites",
-            vec!["{{host}} {{port:53}}".into(), "{{host:local}} {{port:54}}".into()],
+            vec![
+                "{{host}} {{port:53}}".into(),
+                "{{host:local}} {{port:54}}".into(),
+            ],
             &HashMap::from([("port".into(), "853".into())]),
         );
-        assert_eq!(prompt.fields, [("host".into(), "local".into()), ("port".into(), "853".into())]);
+        assert_eq!(
+            prompt.fields,
+            [
+                ("host".into(), "local".into()),
+                ("port".into(), "853".into())
+            ]
+        );
     }
 
     #[test]
     fn opening_shortcut_text_does_not_edit_a_reopened_prompt() {
         let ctx = egui::Context::default();
-        let mut prompt = SnippetPrompt::new("Connect", vec!["{{host:local}}".into()], &HashMap::new());
+        let mut prompt =
+            SnippetPrompt::new("Connect", vec!["{{host:local}}".into()], &HashMap::new());
         let render = |prompt: &mut SnippetPrompt, events| {
             let mut outcome = SnippetOutcome::Pending;
-            let _ = ctx.run(egui::RawInput { events, ..Default::default() }, |ctx| {
-                outcome = snippet_prompt(ctx, prompt, "Copy");
-            });
+            let _ = ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    outcome = snippet_prompt(ctx, prompt, "Copy");
+                },
+            );
             outcome
         };
         render(&mut prompt, vec![]);
         render(&mut prompt, vec![]);
         let escape = egui::Event::Key {
-            key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE,
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
         };
-        assert!(matches!(render(&mut prompt, vec![escape]), SnippetOutcome::Cancel));
+        assert!(matches!(
+            render(&mut prompt, vec![escape]),
+            SnippetOutcome::Cancel
+        ));
 
-        let mut next = SnippetPrompt::new("Connect", vec!["{{host:local}}".into()], &HashMap::new());
+        let mut next =
+            SnippetPrompt::new("Connect", vec!["{{host:local}}".into()], &HashMap::new());
         render(&mut next, vec![egui::Event::Text("2".into())]);
         assert_eq!(next.fields[0].1, "local");
     }
@@ -479,7 +596,10 @@ mod snippet_prompt_tests {
         ctx.style_mut(|style| style.animation_time = 0.0);
         let mut prompt = SnippetPrompt::new(
             "Connect",
-            vec!["λ {{host}} {{port:53}} {{host:}}".into(), "{{literal}}".into()],
+            vec![
+                "λ {{host}} {{port:53}} {{host:}}".into(),
+                "{{literal}}".into(),
+            ],
             &HashMap::from([("literal".into(), "{{host}}".into())]),
         );
         let render = |prompt: &mut SnippetPrompt| {
@@ -490,12 +610,20 @@ mod snippet_prompt_tests {
         render(&mut prompt);
         let output = render(&mut prompt);
         let colors = palette(&ctx);
-        let preview = output.shapes.iter().find_map(|shape| match &shape.shape {
-            egui::Shape::Text(text) if text.galley.job.text.starts_with("λ ") => Some(&text.galley.job),
-            _ => None,
-        }).expect("preview text");
+        let preview = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text.starts_with("λ ") => {
+                    Some(&text.galley.job)
+                }
+                _ => None,
+            })
+            .expect("preview text");
         assert_eq!(preview.text, "λ {{host}} 53 {{host}}\n{{host}}");
-        let highlighted: Vec<_> = preview.sections.iter()
+        let highlighted: Vec<_> = preview
+            .sections
+            .iter()
             .filter(|section| section.format.color == colors.accent)
             .map(|section| &preview.text[section.byte_range.clone()])
             .collect();
@@ -522,15 +650,24 @@ mod snippet_prompt_tests {
         };
         let mut frame = |events: Vec<egui::Event>| {
             let mut outcome = SnippetOutcome::Pending;
-            let _ = ctx.run(egui::RawInput { events, ..Default::default() }, |ctx| {
-                outcome = snippet_prompt(ctx, &mut prompt, "Paste");
-            });
+            let _ = ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    outcome = snippet_prompt(ctx, &mut prompt, "Paste");
+                },
+            );
             outcome
         };
         let focused = || ctx.memory(|memory| memory.focused());
 
         let enter = key(Key::Enter, Modifiers::NONE);
-        assert!(matches!(frame(vec![enter.clone()]), SnippetOutcome::Pending));
+        assert!(matches!(
+            frame(vec![enter.clone()]),
+            SnippetOutcome::Pending
+        ));
         assert_eq!(focused(), Some(Id::new(("snippet_field", 0usize))));
 
         frame(vec![key(Key::Tab, Modifiers::SHIFT)]);
@@ -545,10 +682,18 @@ mod snippet_prompt_tests {
             panic!("Enter should submit the snippet");
         };
         let colors = palette(&ctx);
-        assert_eq!(prompt.preview(FontId::monospace(12.0), colors.text, colors.accent).text, "remote:530");
+        assert_eq!(
+            prompt
+                .preview(FontId::monospace(12.0), colors.text, colors.accent)
+                .text,
+            "remote:530"
+        );
         assert_eq!(
             values,
-            [("host".into(), "remote".into()), ("port".into(), "530".into())]
+            [
+                ("host".into(), "remote".into()),
+                ("port".into(), "530".into())
+            ]
         );
     }
 }
