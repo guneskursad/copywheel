@@ -2,6 +2,7 @@
 
 use super::theme::Palette;
 use super::*;
+use egui::emath::GuiRounding;
 
 const SECTOR_GAP: f32 = 10.0;
 const ARC_SAMPLE_LENGTH: f32 = 2.0;
@@ -113,7 +114,12 @@ pub(super) fn card_shadow(colors: &Palette, p: &egui::Painter, r: Rect, radius: 
         spread: 0,
         color: with_alpha(colors.card_shadow, if colors.dark_mode { alpha } else { alpha * light_strength }),
     };
-    p.add(shadow.as_shape(r, CornerRadius::same(radius)));
+    let mut shape = shadow.as_shape(r, CornerRadius::same(radius));
+    // epaint's inward feather nearly collapses the fill when the blur reaches the
+    // short side. Leave room for the inner contour after pixel rounding.
+    let short_side = shape.rect.round_to_pixels(p.pixels_per_point()).size().min_elem();
+    shape.blur_width = shape.blur_width.min((short_side - 2.0).max(0.0));
+    p.add(shape);
 }
 
 /// Text drawn twice, a hair apart, so it reads as semi-bold.

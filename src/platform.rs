@@ -5,12 +5,27 @@ mod imp {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSPasteboard, NSWorkspace};
+    use objc2_app_kit::{NSApplication, NSPasteboard, NSView, NSWorkspace};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     #[link(name = "ApplicationServices", kind = "framework")]
     // SAFETY: This declaration matches the no-argument ApplicationServices function.
     unsafe extern "C" {
         fn AXIsProcessTrusted() -> bool;
+    }
+
+    pub fn disable_window_shadow(handle: &impl HasWindowHandle, force: bool) {
+        let Some(_mtm) = MainThreadMarker::new() else { return };
+        let Ok(handle) = handle.window_handle() else { return };
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
+        // SAFETY: The borrowed AppKit handle keeps its NSView alive, and we are on the main thread.
+        let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+        if let Some(window) = view.window()
+            && (force || window.hasShadow())
+        {
+            window.setHasShadow(false);
+            window.invalidateShadow();
+        }
     }
 
     pub fn hide_app() {

@@ -244,6 +244,10 @@ pub struct App {
     last_group: Option<u64>,
 
     visible: bool,
+    #[cfg(target_os = "macos")]
+    window_size: Option<egui::Vec2>,
+    #[cfg(target_os = "macos")]
+    refresh_window_shadow: bool,
     pinned: bool,
     was_focused: bool,
     shot: Option<PathBuf>,
@@ -255,6 +259,9 @@ pub struct App {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, shot: Option<PathBuf>) -> Self {
+        #[cfg(target_os = "macos")]
+        platform::disable_window_shadow(cc, true);
+
         let ctx = cc.egui_ctx.clone();
         setup_style(&ctx);
 
@@ -338,6 +345,10 @@ impl App {
             marks_ctx: (Tab::History, String::new()),
             last_group: None,
             visible: true,
+            #[cfg(target_os = "macos")]
+            window_size: None,
+            #[cfg(target_os = "macos")]
+            refresh_window_shadow: false,
             pinned: false,
             was_focused: false,
             shot,
@@ -412,6 +423,11 @@ impl App {
         platform::show_app();
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(ViewportCommand::Focus);
+        #[cfg(target_os = "macos")]
+        {
+            // The next update runs after eframe applies the viewport commands.
+            self.refresh_window_shadow = true;
+        }
         self.visible = true;
         self.was_focused = false;
         ctx.request_repaint();
@@ -854,6 +870,13 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(target_os = "macos")]
+        {
+            let size = ctx.input(|i| i.screen_rect().size() * i.pixels_per_point());
+            let resized = self.window_size.replace(size).is_some_and(|previous| previous != size);
+            let shown = std::mem::take(&mut self.refresh_window_shadow);
+            platform::disable_window_shadow(_frame, resized || shown);
+        }
         self.remember_wheel_root();
         self.handle_messages(ctx);
         theme::apply(ctx, self.shot_theme.unwrap_or(self.store.settings.theme));
