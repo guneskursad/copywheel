@@ -96,6 +96,8 @@ Requirements: macOS 11+, Windows 10/11 x64.
 
 See the [install guide](docs/INSTALL.md) for full instructions, checksum verification, and uninstall steps.
 
+Testing on Windows? Follow the [Windows test checklist](docs/WINDOWS-TESTING.md).
+
 ## Keyboard shortcuts
 
 <details>
